@@ -10,12 +10,13 @@ use axum::{
     Json, Router,
 };
 use deepbook_schema::models::{
-    AssetSupplied, AssetWithdrawn, CollateralEvent, DeepbookPoolConfigUpdated,
+    AssetSupplied, AssetWithdrawn, BookParamsUpdated, CollateralEvent, DeepbookPoolConfigUpdated,
     DeepbookPoolRegistered, DeepbookPoolUpdated, DeepbookPoolUpdatedRegistry,
     InterestParamsUpdated, Liquidation, LoanBorrowed, LoanRepaid, MaintainerCapUpdated,
     MaintainerFeesWithdrawn, MarginManagerCreated, MarginManagerState, MarginPoolConfigUpdated,
-    MarginPoolCreated, PauseCapUpdated, Pools, ProtocolFeesIncreasedEvent, ProtocolFeesWithdrawn,
-    ReferralFeeEvent, ReferralFeesClaimedEvent, SupplierCapMinted, SupplyReferralMinted,
+    MarginPoolCreated, PauseCapUpdated, PoolCreated, Pools, ProtocolFeesIncreasedEvent,
+    ProtocolFeesWithdrawn, ReferralFeeEvent, ReferralFeesClaimedEvent, SupplierCapMinted,
+    SupplyReferralMinted,
 };
 use deepbook_schema::*;
 use diesel::dsl::count_star;
@@ -59,6 +60,9 @@ use sui_types::{
 };
 use tokio::join;
 
+/// Default lookback window for the /orders endpoint when no start_time is provided (7 days in ms).
+const DEFAULT_ORDERS_LOOKBACK_MS: i64 = 7 * 24 * 60 * 60 * 1000;
+
 pub const GET_POOLS_PATH: &str = "/get_pools";
 pub const GET_HISTORICAL_VOLUME_BY_BALANCE_MANAGER_ID_WITH_INTERVAL: &str =
     "/historical_volume_by_balance_manager_id_with_interval/:pool_names/:balance_manager_id";
@@ -83,6 +87,9 @@ pub const DEEP_SUPPLY_PATH: &str = "/deep_supply";
 pub const MARGIN_SUPPLY_PATH: &str = "/margin_supply";
 pub const MARGIN_POOL_MODULE: &str = "margin_pool";
 pub const OHCLV_PATH: &str = "/ohclv/:pool_name";
+pub const FEES_PATH: &str = "/fees";
+pub const FEES_MODULE: &str = "pool";
+pub const FEES_FUNCTION: &str = "pool_trade_params";
 
 // Deepbook Margin Events
 pub const MARGIN_MANAGER_CREATED_PATH: &str = "/margin_manager_created";
@@ -114,6 +121,8 @@ pub const DEPOSITED_ASSETS_PATH: &str = "/deposited_assets/:balance_manager_ids"
 pub const COLLATERAL_EVENTS_PATH: &str = "/collateral_events";
 pub const GET_POINTS_PATH: &str = "/get_points";
 pub const PORTFOLIO_PATH: &str = "/portfolio/:wallet_address";
+pub const POOL_CREATED_PATH: &str = "/pool_created";
+pub const BOOK_PARAMS_UPDATED_PATH: &str = "/book_params_updated";
 
 type AdminRateLimiter = RateLimiter<
     governor::state::NotKeyed,
@@ -284,7 +293,7 @@ pub async fn run_server(
     if let Some(margin_pkg_id) = margin_package_id {
         let cancellation_token = tokio_util::sync::CancellationToken::new();
         let margin_metrics = crate::margin_metrics::MarginMetrics::new(metrics.registry());
-        let margin_db = sui_pg_db::Db::for_read(database_url, db_arg).await?;
+        let margin_db = sui_pg_db::Db::for_write(database_url, db_arg).await?;
         let margin_poller = crate::margin_metrics::MarginPoller::new(
             margin_db,
             rpc_url.clone(),
@@ -402,6 +411,8 @@ pub(crate) fn make_router(state: Arc<AppState>) -> Router {
         .route(COLLATERAL_EVENTS_PATH, get(collateral_events))
         .route(GET_POINTS_PATH, get(get_points))
         .route(PORTFOLIO_PATH, get(portfolio))
+        .route(POOL_CREATED_PATH, get(pool_created))
+        .route(BOOK_PARAMS_UPDATED_PATH, get(book_params_updated))
         .with_state(state.clone());
 
     let rpc_routes = Router::new()
@@ -410,6 +421,7 @@ pub(crate) fn make_router(state: Arc<AppState>) -> Router {
         .route(MARGIN_SUPPLY_PATH, get(margin_supply))
         .route(SUMMARY_PATH, get(summary))
         .route(STATUS_PATH, get(status))
+        .route(FEES_PATH, get(fees))
         .with_state(state.clone());
 
     let admin = admin_routes(state.clone()).with_state(state.clone());
@@ -457,14 +469,17 @@ async fn status(
         let checkpoint_lag = latest_checkpoint as i64 - checkpoint_hi;
         let time_lag_ms = current_time_ms - timestamp_ms_hi;
         let time_lag_seconds = time_lag_ms / 1000;
+        let is_backfill = pipeline.contains("@backfill");
 
-        // Track the earliest checkpoint and pipeline with max lag
-        if checkpoint_hi < min_checkpoint {
-            min_checkpoint = checkpoint_hi;
-        }
-        if checkpoint_lag > max_checkpoint_lag {
-            max_checkpoint_lag = checkpoint_lag;
-            max_lag_pipeline_name = pipeline.clone();
+        // Exclude backfill pipelines from health calculation
+        if !is_backfill {
+            if checkpoint_hi < min_checkpoint {
+                min_checkpoint = checkpoint_hi;
+            }
+            if checkpoint_lag > max_checkpoint_lag {
+                max_checkpoint_lag = checkpoint_lag;
+                max_lag_pipeline_name = pipeline.clone();
+            }
         }
 
         pipelines.push(serde_json::json!({
@@ -475,12 +490,19 @@ async fn status(
             "checkpoint_lag": checkpoint_lag,
             "time_lag_seconds": time_lag_seconds,
             "latest_onchain_checkpoint": latest_checkpoint,
+            "is_backfill": is_backfill,
         }));
     }
 
     let max_time_lag_seconds = pipelines
         .iter()
-        .filter_map(|p| p["time_lag_seconds"].as_i64())
+        .filter_map(|p| {
+            if p["is_backfill"].as_bool() == Some(true) {
+                None
+            } else {
+                p["time_lag_seconds"].as_i64()
+            }
+        })
         .max()
         .unwrap_or(0);
 
@@ -707,8 +729,8 @@ async fn get_historical_volume_by_balance_manager_id_with_interval(
         let results = state
             .reader
             .get_order_fill_summary(
-                start_time,
-                end_time,
+                current_start,
+                current_end,
                 &pool_ids,
                 &balance_manager_id,
                 volume_in_base,
@@ -1168,9 +1190,21 @@ async fn orders(
             .collect::<Vec<_>>()
     });
 
+    let end_time = params.end_time();
+    let start_time = params
+        .start_time()
+        .unwrap_or_else(|| end_time - DEFAULT_ORDERS_LOOKBACK_MS);
+
     let orders = state
         .reader
-        .get_orders_status(pool_id, limit, Some(balance_manager_id), status_filter)
+        .get_orders_status(
+            pool_id,
+            limit,
+            Some(balance_manager_id),
+            status_filter,
+            start_time,
+            end_time,
+        )
         .await?;
 
     let base_factor = 10u64.pow(base_decimals as u32);
@@ -1742,6 +1776,143 @@ async fn deep_supply(State(state): State<Arc<AppState>>) -> Result<Json<u64>, De
     Ok(Json(total_supply_value))
 }
 
+#[derive(serde::Serialize)]
+struct PoolFees {
+    pool_id: String,
+    taker_fee: f64,
+    maker_fee: f64,
+    stake_required: f64,
+}
+
+/// Returns maker_fee, taker_fee, and stake_required for all pools via a single PTB
+async fn fees(
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<HashMap<String, PoolFees>>, DeepBookError> {
+    let pools: Vec<Pools> = state.reader.get_pools().await?;
+    let sui_client = state.sui_client().await?;
+    let package = ObjectID::from_hex_literal(&state.deepbook_package_id)
+        .map_err(|e| DeepBookError::bad_request(format!("Invalid package ID: {}", e)))?;
+
+    // Fetch all pool objects to get initial_shared_version
+    let pool_object_futures = pools.iter().map(|pool| {
+        let pool_id = pool.pool_id.clone();
+        async move {
+            let pool_address = ObjectID::from_hex_literal(&pool_id)?;
+            let pool_object: SuiObjectResponse = sui_client
+                .read_api()
+                .get_object_with_options(
+                    pool_address,
+                    SuiObjectDataOptions::full_content().with_owner(),
+                )
+                .await?;
+            Ok::<_, DeepBookError>(pool_object)
+        }
+    });
+    let pool_objects: Vec<Result<SuiObjectResponse, DeepBookError>> =
+        join_all(pool_object_futures).await;
+
+    let mut ptb = ProgrammableTransactionBuilder::new();
+    let mut valid_pools: Vec<&Pools> = Vec::new();
+
+    for (pool, pool_object_result) in pools.iter().zip(pool_objects.into_iter()) {
+        let pool_object = match pool_object_result {
+            Ok(obj) => obj,
+            Err(_) => continue,
+        };
+        let pool_data = match pool_object.data.as_ref() {
+            Some(data) => data,
+            None => continue,
+        };
+        let initial_shared_version = match &pool_data.owner {
+            Some(sui_types::object::Owner::Shared {
+                initial_shared_version,
+            }) => *initial_shared_version,
+            _ => continue,
+        };
+
+        let input_idx = valid_pools.len() as u16;
+        let pool_input = CallArg::Object(ObjectArg::SharedObject {
+            id: pool_data.object_id,
+            initial_shared_version,
+            mutability: sui_types::transaction::SharedObjectMutability::Immutable,
+        });
+        ptb.input(pool_input)?;
+
+        let base_coin_type = parse_type_input(&pool.base_asset_id)?;
+        let quote_coin_type = parse_type_input(&pool.quote_asset_id)?;
+
+        ptb.command(Command::MoveCall(Box::new(ProgrammableMoveCall {
+            package,
+            module: FEES_MODULE.to_string(),
+            function: FEES_FUNCTION.to_string(),
+            type_arguments: vec![base_coin_type, quote_coin_type],
+            arguments: vec![Argument::Input(input_idx)],
+        })));
+
+        valid_pools.push(pool);
+    }
+
+    if valid_pools.is_empty() {
+        return Ok(Json(HashMap::new()));
+    }
+
+    let builder = ptb.finish();
+    let tx = TransactionKind::ProgrammableTransaction(builder);
+
+    let result = sui_client
+        .read_api()
+        .dev_inspect_transaction_block(SuiAddress::default(), tx, None, None, None)
+        .await?;
+
+    let results = result.results.ok_or(DeepBookError::rpc(
+        "No results from dev_inspect_transaction_block",
+    ))?;
+
+    let mut fees = HashMap::new();
+    for (i, pool) in valid_pools.iter().enumerate() {
+        let return_values = &results
+            .get(i)
+            .ok_or(DeepBookError::rpc("Missing result for pool"))?
+            .return_values;
+
+        let taker_fee: u64 = bcs::from_bytes(
+            &return_values
+                .first()
+                .ok_or(DeepBookError::rpc("Missing taker_fee"))?
+                .0,
+        )
+        .map_err(|_| DeepBookError::deserialization("Failed to deserialize taker_fee"))?;
+
+        let maker_fee: u64 = bcs::from_bytes(
+            &return_values
+                .get(1)
+                .ok_or(DeepBookError::rpc("Missing maker_fee"))?
+                .0,
+        )
+        .map_err(|_| DeepBookError::deserialization("Failed to deserialize maker_fee"))?;
+
+        let stake_required: u64 = bcs::from_bytes(
+            &return_values
+                .get(2)
+                .ok_or(DeepBookError::rpc("Missing stake_required"))?
+                .0,
+        )
+        .map_err(|_| DeepBookError::deserialization("Failed to deserialize stake_required"))?;
+
+        fees.insert(
+            pool.pool_name.clone(),
+            PoolFees {
+                pool_id: pool.pool_id.clone(),
+                taker_fee: taker_fee as f64 / 1_000_000_000.0,
+                maker_fee: maker_fee as f64 / 1_000_000_000.0,
+                stake_required: stake_required as f64 / 1_000_000.0,
+            },
+        );
+    }
+
+    Ok(Json(fees))
+}
+
 /// Get total supply for all margin pools
 async fn margin_supply(
     State(state): State<Arc<AppState>>,
@@ -1874,6 +2045,24 @@ async fn get_net_deposits(
     Ok(Json(net_deposits))
 }
 
+async fn pool_created(
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<Vec<PoolCreated>>, DeepBookError> {
+    Ok(Json(state.reader.get_pool_created().await?))
+}
+
+async fn book_params_updated(
+    Query(params): Query<HashMap<String, String>>,
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<Option<BookParamsUpdated>>, DeepBookError> {
+    let pool_id = params
+        .get("pool_id")
+        .cloned()
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| DeepBookError::bad_request("pool_id is required"))?;
+    Ok(Json(state.reader.get_book_params_updated(pool_id).await?))
+}
+
 fn parse_type_input(type_str: &str) -> Result<TypeInput, DeepBookError> {
     let type_tag = TypeTag::from_str(type_str)?;
     Ok(TypeInput::from(type_tag))
@@ -1972,16 +2161,17 @@ async fn margin_manager_created(
     Query(params): Query<HashMap<String, String>>,
     State(state): State<Arc<AppState>>,
 ) -> Result<Json<Vec<MarginManagerCreated>>, DeepBookError> {
-    let end_time = params.end_time();
-    let start_time = params
-        .start_time()
-        .unwrap_or_else(|| end_time - 24 * 60 * 60 * 1000);
+    let start_time = params.start_time();
+    let end_time = params
+        .get("end_time")
+        .and_then(|v| v.parse::<i64>().ok())
+        .map(|t| t * 1000);
     let limit = params.limit();
-    let margin_manager_id_filter = params.get("margin_manager_id").cloned().unwrap_or_default();
+    let owner_filter = params.get("owner").cloned();
 
     let results = state
         .reader
-        .get_margin_manager_created(start_time, end_time, limit, margin_manager_id_filter)
+        .get_margin_manager_created(start_time, end_time, limit, owner_filter)
         .await?;
 
     Ok(Json(results))

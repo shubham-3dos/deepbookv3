@@ -6,28 +6,14 @@
   "main": "index.js",
   "scripts": {
     "test": "echo \"Error: no test specified\" && exit 1",
-    "create-pool": "pnpm tsx transactions/createPool.ts",
-    "localnet": "pnpm tsx transactions/localnetDeploy.ts",
-    "dusdc-publish": "pnpm tsx transactions/predict/dusdcPublish.ts",
-    "dusdc-mint": "pnpm tsx transactions/predict/dusdcMint.ts",
-    "predict-publish": "pnpm tsx transactions/predict/publish.ts",
-    "predict-init": "pnpm tsx transactions/predict/init.ts",
-    "predict-deposit": "pnpm tsx transactions/predict/deposit.ts",
-    "predict-create-oracle-cap": "pnpm tsx transactions/predict/createOracleCap.ts",
-    "predict-create-oracle": "pnpm tsx transactions/predict/createOracle.ts",
-    "predict-deploy-oracles": "pnpm tsx transactions/predict/deployOracles.ts",
-    "predict-redeploy": "pnpm tsx transactions/predict/redeploy.ts",
-    "predict-setup-cap-lanes": "pnpm tsx transactions/predict/setupOracleCapLanes.ts",
-    "oracle-feed": "pnpm tsx services/oracle-feed.ts",
-    "oracle-dashboard": "pnpm tsx services/oracle-dashboard.ts"
+    "create-pool": "pnpm tsx transactions/createPool.ts"
   },
   "keywords": [],
   "author": "",
   "license": "ISC",
   "dependencies": {
-    "@mysten/deepbook-v3": "^1.0.9",
-    "@mysten/sui": "^2.1.0",
-    "dotenv": "^17.3.1",
+    "@mysten/deepbook-v3": "^1.2.1",
+    "@mysten/sui": "^2.5.0",
     "esbuild": "^0.27.2",
     "tsx": "^4.21.0"
   }

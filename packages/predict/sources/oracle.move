@@ -14,10 +14,8 @@ module deepbook_predict::oracle;
 
 use deepbook::math;
 use deepbook_predict::{constants, math as predict_math};
-use sui::{clock::Clock, dynamic_field as df, event};
-
-use fun df::exists_ as UID.exists_;
-use fun df::add as UID.add;
+use std::string::String;
+use sui::{clock::Clock, event, vec_set::{Self, VecSet}};
 
 // === Errors ===
 
@@ -26,7 +24,6 @@ const EOracleStale: u64 = 1;
 const EOracleAlreadyActive: u64 = 2;
 const EOracleExpired: u64 = 3;
 const ECannotBeNegative: u64 = 4;
-const ECapAlreadyRegistered: u64 = 5;
 
 // === Events ===
 
@@ -65,9 +62,6 @@ public struct OracleSVIUpdated has copy, drop, store {
 
 // === Structs ===
 
-/// Dynamic field key for additional authorized caps on an oracle.
-public struct AuthorizedCapKey(ID) has copy, drop, store;
-
 /// SVI volatility surface parameters.
 /// All values scaled by FLOAT_SCALING (1e9).
 public struct SVIParams has copy, drop, store {
@@ -98,10 +92,12 @@ public struct PriceData has copy, drop, store {
 
 /// Shared oracle object storing SVI volatility surface data.
 /// One oracle per underlying + expiry combination.
-public struct OracleSVI<phantom Underlying> has key {
+public struct OracleSVI has key {
     id: UID,
-    /// ID of the OracleCap authorized to update this oracle
-    oracle_cap_id: ID,
+    /// IDs of OracleCaps authorized to update this oracle
+    authorized_caps: VecSet<ID>,
+    /// The underlying asset this oracle tracks (e.g., "BTC", "ETH")
+    underlying_asset: String,
     /// Expiration timestamp in milliseconds
     expiry: u64,
     /// Whether the oracle is active
@@ -118,6 +114,13 @@ public struct OracleSVI<phantom Underlying> has key {
     settlement_price: Option<u64>,
 }
 
+/// Curve sample point with strike and both UP/DOWN prices.
+public struct CurvePoint has copy, drop, store {
+    strike: u64,
+    up_price: u64,
+    dn_price: u64,
+}
+
 /// Capability for Block Scholes operator to create and update oracles.
 public struct OracleCapSVI has key, store {
     id: UID,
@@ -126,28 +129,26 @@ public struct OracleCapSVI has key, store {
 // === Public Functions ===
 
 /// Activate the oracle. Must be called before oracle can be used for pricing.
-public fun activate<Underlying>(
-    oracle: &mut OracleSVI<Underlying>,
-    cap: &OracleCapSVI,
-    clock: &Clock,
-) {
+public fun activate(oracle: &mut OracleSVI, cap: &OracleCapSVI, clock: &Clock) {
     assert_authorized_cap(oracle, cap);
     assert!(!oracle.active, EOracleAlreadyActive);
-    assert!(clock.timestamp_ms() < oracle.expiry, EOracleExpired);
+
+    let now = clock.timestamp_ms();
+    assert!(now < oracle.expiry, EOracleExpired);
 
     oracle.active = true;
 
     event::emit(OracleActivated {
         oracle_id: oracle.id.to_inner(),
         expiry: oracle.expiry,
-        timestamp: clock.timestamp_ms(),
+        timestamp: now,
     });
 }
 
 /// Push spot and forward prices (high frequency ~1s).
 /// If past expiry and not settled, freezes settlement price and deactivates.
-public fun update_prices<Underlying>(
-    oracle: &mut OracleSVI<Underlying>,
+public fun update_prices(
+    oracle: &mut OracleSVI,
     cap: &OracleCapSVI,
     prices: PriceData,
     clock: &Clock,
@@ -155,6 +156,7 @@ public fun update_prices<Underlying>(
     assert_authorized_cap(oracle, cap);
 
     let now = clock.timestamp_ms();
+    let oracle_id = oracle.id.to_inner();
 
     // If past expiry and not yet settled, freeze settlement price and deactivate
     if (now > oracle.expiry && oracle.settlement_price.is_none()) {
@@ -162,18 +164,19 @@ public fun update_prices<Underlying>(
         oracle.active = false;
 
         event::emit(OracleSettled {
-            oracle_id: oracle.id.to_inner(),
+            oracle_id,
             expiry: oracle.expiry,
             settlement_price: prices.spot,
             timestamp: now,
         });
+        return
     };
 
     oracle.prices = prices;
     oracle.timestamp = now;
 
     event::emit(OraclePricesUpdated {
-        oracle_id: oracle.id.to_inner(),
+        oracle_id,
         spot: prices.spot,
         forward: prices.forward,
         timestamp: now,
@@ -181,18 +184,21 @@ public fun update_prices<Underlying>(
 }
 
 /// Push SVI parameters and risk-free rate (low frequency ~10-20s).
-public fun update_svi<Underlying>(
-    oracle: &mut OracleSVI<Underlying>,
+public fun update_svi(
+    oracle: &mut OracleSVI,
     cap: &OracleCapSVI,
     svi: SVIParams,
     risk_free_rate: u64,
     clock: &Clock,
 ) {
     assert_authorized_cap(oracle, cap);
+    assert!(!is_settled(oracle), EOracleExpired);
+
+    let now = clock.timestamp_ms();
 
     oracle.svi = svi;
     oracle.risk_free_rate = risk_free_rate;
-    oracle.timestamp = clock.timestamp_ms();
+    oracle.timestamp = now;
 
     event::emit(OracleSVIUpdated {
         oracle_id: oracle.id.to_inner(),
@@ -204,81 +210,109 @@ public fun update_svi<Underlying>(
         m_negative: svi.m_negative,
         sigma: svi.sigma,
         risk_free_rate,
-        timestamp: oracle.timestamp,
+        timestamp: now,
     });
 }
 
 /// Get the oracle ID.
-public fun id<Underlying>(oracle: &OracleSVI<Underlying>): ID {
+public fun id(oracle: &OracleSVI): ID {
     oracle.id.to_inner()
 }
 
+/// Get the underlying asset name.
+public fun underlying_asset(oracle: &OracleSVI): String {
+    oracle.underlying_asset
+}
+
 /// Get the current spot price.
-public fun spot_price<Underlying>(oracle: &OracleSVI<Underlying>): u64 {
+public fun spot_price(oracle: &OracleSVI): u64 {
     oracle.prices.spot
 }
 
 /// Get the forward price for this expiry.
-public fun forward_price<Underlying>(oracle: &OracleSVI<Underlying>): u64 {
+public fun forward_price(oracle: &OracleSVI): u64 {
     oracle.prices.forward
 }
 
 /// Get the price data.
-public fun prices<Underlying>(oracle: &OracleSVI<Underlying>): PriceData {
+public fun prices(oracle: &OracleSVI): PriceData {
     oracle.prices
 }
 
 /// Get the SVI parameters.
-public fun svi<Underlying>(oracle: &OracleSVI<Underlying>): SVIParams {
+public fun svi(oracle: &OracleSVI): SVIParams {
     oracle.svi
 }
 
 /// Get the expiry timestamp.
-public fun expiry<Underlying>(oracle: &OracleSVI<Underlying>): u64 {
+public fun expiry(oracle: &OracleSVI): u64 {
     oracle.expiry
 }
 
 /// Get the risk-free rate.
-public fun risk_free_rate<Underlying>(oracle: &OracleSVI<Underlying>): u64 {
+public fun risk_free_rate(oracle: &OracleSVI): u64 {
     oracle.risk_free_rate
 }
 
 /// Get the last update timestamp.
-public fun timestamp<Underlying>(oracle: &OracleSVI<Underlying>): u64 {
+public fun timestamp(oracle: &OracleSVI): u64 {
     oracle.timestamp
 }
 
 /// Get the settlement price (only valid after settlement).
-public fun settlement_price<Underlying>(oracle: &OracleSVI<Underlying>): Option<u64> {
+public fun settlement_price(oracle: &OracleSVI): Option<u64> {
     oracle.settlement_price
 }
 
 /// Check if the oracle data is stale (> 30s since last update).
-public fun is_stale<Underlying>(oracle: &OracleSVI<Underlying>, clock: &Clock): bool {
+public fun is_stale(oracle: &OracleSVI, clock: &Clock): bool {
     let now = clock.timestamp_ms();
     now > oracle.timestamp + constants::staleness_threshold_ms!()
 }
 
 /// Check if the oracle has been settled.
-public fun is_settled<Underlying>(oracle: &OracleSVI<Underlying>): bool {
+public fun is_settled(oracle: &OracleSVI): bool {
     oracle.settlement_price.is_some()
 }
 
 /// Check if the oracle is active.
-public fun is_active<Underlying>(oracle: &OracleSVI<Underlying>): bool {
+public fun is_active(oracle: &OracleSVI): bool {
     oracle.active
 }
+
+/// Create a new PriceData struct.
+public fun new_price_data(spot: u64, forward: u64): PriceData {
+    PriceData { spot, forward }
+}
+
+/// Create a new SVIParams struct.
+public fun new_svi_params(
+    a: u64,
+    b: u64,
+    rho: u64,
+    rho_negative: bool,
+    m: u64,
+    m_negative: bool,
+    sigma: u64,
+): SVIParams {
+    SVIParams { a, b, rho, rho_negative, m, m_negative, sigma }
+}
+
+public fun new_curve_point(strike: u64, up_price: u64, dn_price: u64): CurvePoint {
+    CurvePoint { strike, up_price, dn_price }
+}
+
+public fun strike(point: &CurvePoint): u64 { point.strike }
+
+public fun up_price(point: &CurvePoint): u64 { point.up_price }
+
+public fun dn_price(point: &CurvePoint): u64 { point.dn_price }
 
 // === Public-Package Functions ===
 
 /// Register an additional cap as authorized to update an oracle.
-public(package) fun register_cap<Underlying>(
-    oracle: &mut OracleSVI<Underlying>,
-    cap: &OracleCapSVI,
-) {
-    let cap_id = cap.id.to_inner();
-    assert!(!oracle.id.exists_<AuthorizedCapKey>(AuthorizedCapKey(cap_id)), ECapAlreadyRegistered);
-    oracle.id.add(AuthorizedCapKey(cap_id), true);
+public(package) fun register_cap(oracle: &mut OracleSVI, cap: &OracleCapSVI) {
+    oracle.authorized_caps.insert(cap.id.to_inner());
 }
 
 /// Create a new OracleCap. Called by registry during setup.
@@ -287,17 +321,14 @@ public(package) fun create_oracle_cap(ctx: &mut TxContext): OracleCapSVI {
 }
 
 /// Create a new SVI Oracle for an underlying + expiry. Returns the oracle ID.
-public(package) fun create_oracle<Underlying>(
-    cap: &OracleCapSVI,
-    expiry: u64,
-    ctx: &mut TxContext,
-): ID {
+public(package) fun create_oracle(underlying_asset: String, expiry: u64, ctx: &mut TxContext): ID {
     let oracle_uid = object::new(ctx);
     let oracle_id = oracle_uid.to_inner();
 
-    let oracle = OracleSVI<Underlying> {
+    let oracle = OracleSVI {
         id: oracle_uid,
-        oracle_cap_id: cap.id.to_inner(),
+        authorized_caps: vec_set::empty(),
+        underlying_asset,
         expiry,
         active: false,
         prices: PriceData { spot: 0, forward: 0 },
@@ -319,42 +350,129 @@ public(package) fun create_oracle<Underlying>(
     oracle_id
 }
 
-/// Binary option price using SVI + Black-Scholes, discounted by e^(-r*t).
+/// Binary option price. If settled, returns deterministic 0/100%.
+/// Otherwise uses SVI + Black-Scholes, discounted by e^(-r*t).
+/// At-the-money (price == strike) settles as DOWN win.
 /// Returns price in FLOAT_SCALING (1e9).
-public(package) fun get_binary_price<Underlying>(
-    oracle: &OracleSVI<Underlying>,
+public(package) fun get_binary_price(
+    oracle: &OracleSVI,
     strike: u64,
     is_up: bool,
     clock: &Clock,
 ): u64 {
+    if (oracle.settlement_price.is_some()) {
+        let settlement_price = oracle.settlement_price.destroy_some();
+        let up_wins = settlement_price > strike;
+        let won = if (is_up) { up_wins } else { !up_wins };
+        return if (won) { constants::float_scaling!() } else { 0 }
+    };
+
     let nd2 = compute_nd2(oracle, strike, is_up);
-
-    // Discount: e^(-r * t), time only needed here
-    let tte_ms = oracle.expiry - clock.timestamp_ms();
-    let t = math::div(tte_ms, constants::ms_per_year!());
-    let rt = math::mul(oracle.risk_free_rate, t);
-    let discount = predict_math::exp(rt, true);
-
+    let discount = compute_discount(oracle, clock);
     math::mul(discount, nd2)
 }
 
-/// Binary option price without discount factor (assumes r ≈ 0).
-/// No clock needed — time cancels entirely from the formula.
-/// Returns price in FLOAT_SCALING (1e9).
-public(package) fun get_binary_price_undiscounted<Underlying>(
-    oracle: &OracleSVI<Underlying>,
-    strike: u64,
-    is_up: bool,
-): u64 {
-    compute_nd2(oracle, strike, is_up)
+/// Assert that the oracle is not stale. Aborts if stale.
+public(package) fun assert_not_stale(oracle: &OracleSVI, clock: &Clock) {
+    assert!(!is_stale(oracle, clock), EOracleStale);
 }
+
+/// Build an adaptive piecewise-linear approximation of the pricing curve.
+/// Concentrates sample points near ATM where the sigmoid is steepest.
+/// For settled oracles, returns a step-function curve at the settlement price.
+/// Returns a sorted vector of CurvePoints for use with treap.evaluate().
+public(package) fun build_curve(
+    oracle: &OracleSVI,
+    min_strike: u64,
+    max_strike: u64,
+    clock: &Clock,
+): vector<CurvePoint> {
+    if (oracle.is_settled()) {
+        let settlement = oracle.settlement_price().destroy_some();
+        let full_price = constants::float_scaling!();
+        return vector[
+            new_curve_point(settlement - 1, full_price, 0),
+            new_curve_point(settlement, 0, full_price),
+        ]
+    };
+
+    let sample_limit = constants::default_curve_samples!();
+    let discount = compute_discount(oracle, clock);
+
+    // Single-strike edge case
+    if (min_strike == max_strike) {
+        return vector[oracle.eval_strike(min_strike, discount)]
+    };
+
+    // Seed with min, forward (if in range), max — deduplicating
+    let forward = oracle.prices.forward;
+    let mut points = vector[oracle.eval_strike(min_strike, discount)];
+    let mut used = 1u64;
+
+    if (forward > min_strike && forward < max_strike) {
+        points.push_back(oracle.eval_strike(forward, discount));
+        used = used + 1;
+    };
+    points.push_back(oracle.eval_strike(max_strike, discount));
+    used = used + 1;
+
+    // Adaptive refinement: pick interval with max error, bisect it
+    while (used < sample_limit) {
+        let len = points.length();
+        let mut best_score = 0u64;
+        let mut best_idx = 0u64;
+        let mut i = 0;
+        while (i < len - 1) {
+            let interval = points[i + 1].strike() - points[i].strike();
+            if (interval < constants::min_curve_interval!()) {
+                i = i + 1;
+                continue
+            };
+
+            let score = if (i > 0 && i < len - 2) {
+                // Interior: second finite difference
+                let sum_ends = points[i - 1].up_price() + points[i + 1].up_price();
+                let twice_mid = 2 * points[i].up_price();
+                math::mul(sum_ends.diff(twice_mid), interval)
+            } else {
+                // Edge: use slope magnitude
+                math::mul(points[i].up_price().diff(points[i + 1].up_price()), interval)
+            };
+
+            if (score > best_score) {
+                best_score = score;
+                best_idx = i;
+            };
+            i = i + 1;
+        };
+
+        // No refineable interval found
+        if (best_score == 0) break;
+
+        let mid_strike = (points[best_idx].strike() + points[best_idx + 1].strike()) / 2;
+        let new_point = oracle.eval_strike(mid_strike, discount);
+
+        // Insert at sorted position (best_idx + 1)
+        points.push_back(new_point); // append to end
+        let mut j = points.length() - 1;
+        while (j > best_idx + 1) {
+            points.swap(j, j - 1);
+            j = j - 1;
+        };
+        used = used + 1;
+    };
+
+    points
+}
+
+// === Private Functions ===
 
 /// SVI + Black-Scholes N(d2) in a single pass.
 ///
 /// SVI gives total_variance directly, so IV and time cancel in d2:
 ///   iv = sqrt(total_var / t), iv * sqrt(t) = sqrt(total_var)
 ///   d2 = (ln(F/K) - total_var/2) / sqrt(total_var)
-fun compute_nd2<Underlying>(oracle: &OracleSVI<Underlying>, strike: u64, is_up: bool): u64 {
+fun compute_nd2(oracle: &OracleSVI, strike: u64, is_up: bool): u64 {
     let forward = oracle.prices.forward;
 
     // SVI: compute total variance from log-moneyness
@@ -388,34 +506,46 @@ fun compute_nd2<Underlying>(oracle: &OracleSVI<Underlying>, strike: u64, is_up: 
     predict_math::normal_cdf(d2, cdf_neg)
 }
 
-/// Check that the cap is the original creator cap or a registered additional cap.
-fun assert_authorized_cap<Underlying>(oracle: &OracleSVI<Underlying>, cap: &OracleCapSVI) {
-    let cap_id = cap.id.to_inner();
-    assert!(
-        oracle.oracle_cap_id == cap_id ||
-            oracle.id.exists_<AuthorizedCapKey>(AuthorizedCapKey(cap_id)),
-        EInvalidOracleCap,
-    );
+/// Compute discount factor e^(-r * t).
+/// Past expiry returns 1.0 (no discounting) to handle the window between
+/// expiry and settlement.
+fun compute_discount(oracle: &OracleSVI, clock: &Clock): u64 {
+    let now = clock.timestamp_ms();
+    if (now >= oracle.expiry) return constants::float_scaling!();
+    let tte_ms = oracle.expiry - now;
+    let t = math::div(tte_ms, constants::ms_per_year!());
+    let rt = math::mul(oracle.risk_free_rate, t);
+    predict_math::exp(rt, true)
 }
 
-/// Assert that the oracle is not stale. Aborts if stale.
-public(package) fun assert_not_stale<Underlying>(oracle: &OracleSVI<Underlying>, clock: &Clock) {
-    assert!(!is_stale(oracle, clock), EOracleStale);
+/// Evaluate one strike, returning a CurvePoint with both UP and DOWN prices.
+/// Uses the complement property: dn = discount - up, costing only 1 compute_nd2 call.
+fun eval_strike(oracle: &OracleSVI, strike: u64, discount: u64): CurvePoint {
+    let nd2 = compute_nd2(oracle, strike, true);
+    let up = math::mul(discount, nd2);
+    let dn = if (discount > up) { discount - up } else { 0 };
+    new_curve_point(strike, up, dn)
+}
+
+fun assert_authorized_cap(oracle: &OracleSVI, cap: &OracleCapSVI) {
+    assert!(oracle.authorized_caps.contains(&cap.id.to_inner()), EInvalidOracleCap);
 }
 
 #[test_only]
 /// Create a test oracle with given params. Bypasses cap/share requirements.
-public(package) fun create_test_oracle<Underlying>(
+public(package) fun create_test_oracle(
+    underlying_asset: String,
     svi: SVIParams,
     prices: PriceData,
     risk_free_rate: u64,
     expiry: u64,
     timestamp: u64,
     ctx: &mut TxContext,
-): OracleSVI<Underlying> {
-    OracleSVI<Underlying> {
+): OracleSVI {
+    OracleSVI {
         id: object::new(ctx),
-        oracle_cap_id: object::id_from_address(@0x0),
+        authorized_caps: vec_set::empty(),
+        underlying_asset,
         expiry,
         active: true,
         prices,
@@ -428,25 +558,7 @@ public(package) fun create_test_oracle<Underlying>(
 
 #[test_only]
 /// Force-settle the oracle at a given price for testing.
-public(package) fun settle_test_oracle<Underlying>(oracle: &mut OracleSVI<Underlying>, price: u64) {
+public(package) fun settle_test_oracle(oracle: &mut OracleSVI, price: u64) {
     oracle.settlement_price = option::some(price);
     oracle.active = false;
-}
-
-/// Create a new PriceData struct.
-public fun new_price_data(spot: u64, forward: u64): PriceData {
-    PriceData { spot, forward }
-}
-
-/// Create a new SVIParams struct.
-public fun new_svi_params(
-    a: u64,
-    b: u64,
-    rho: u64,
-    rho_negative: bool,
-    m: u64,
-    m_negative: bool,
-    sigma: u64,
-): SVIParams {
-    SVIParams { a, b, rho, rho_negative, m, m_negative, sigma }
 }

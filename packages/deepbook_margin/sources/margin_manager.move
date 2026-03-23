@@ -4,6 +4,7 @@
 module deepbook_margin::margin_manager;
 
 use deepbook::{
+    account::Account,
     balance_manager::{
         Self,
         BalanceManager,
@@ -57,6 +58,7 @@ const ERepaySharesTooLow: u64 = 14;
 const EPoolNotEnabledForMarginTrading: u64 = 15;
 const EConditionalOrderNotFound: u64 = 16;
 const EOutstandingDebt: u64 = 17;
+const EOutstandingAsset: u64 = 18;
 
 // === Structs ===
 /// Witness type for authorizing MarginManager to call protected features of the DeepBook
@@ -363,6 +365,16 @@ public fun share<BaseAsset, QuoteAsset>(
     } = initializer;
 }
 
+/// Register the margin manager back to the margin registry.
+public fun register_margin_manager<BaseAsset, QuoteAsset>(
+    self: &mut MarginManager<BaseAsset, QuoteAsset>,
+    margin_registry: &mut MarginRegistry,
+    ctx: &mut TxContext,
+) {
+    self.validate_owner(ctx);
+    margin_registry.add_margin_manager(self.id(), ctx);
+}
+
 /// Unregister the margin manager from the margin registry.
 public fun unregister_margin_manager<BaseAsset, QuoteAsset>(
     self: &mut MarginManager<BaseAsset, QuoteAsset>,
@@ -373,6 +385,9 @@ public fun unregister_margin_manager<BaseAsset, QuoteAsset>(
     assert!(self.borrowed_base_shares == 0, EOutstandingDebt);
     assert!(self.borrowed_quote_shares == 0, EOutstandingDebt);
     assert!(self.margin_pool_id.is_none(), EOutstandingDebt);
+    assert!(self.base_balance() == 0, EOutstandingAsset);
+    assert!(self.quote_balance() == 0, EOutstandingAsset);
+    assert!(self.deep_balance() == 0, EOutstandingAsset);
 
     margin_registry.remove_margin_manager(self.id(), ctx);
 }
@@ -1181,6 +1196,71 @@ public fun locked_balance<BaseAsset, QuoteAsset>(
     pool: &Pool<BaseAsset, QuoteAsset>,
 ): (u64, u64, u64) {
     pool.locked_balance(&self.balance_manager)
+}
+
+public fun balance_manager_id<BaseAsset, QuoteAsset>(
+    self: &MarginManager<BaseAsset, QuoteAsset>,
+): ID {
+    self.balance_manager.id()
+}
+
+public fun get_balance_manager_referral_id<BaseAsset, QuoteAsset>(
+    self: &MarginManager<BaseAsset, QuoteAsset>,
+    pool_id: ID,
+): Option<ID> {
+    self.balance_manager.get_balance_manager_referral_id(pool_id)
+}
+
+public fun account_exists<BaseAsset, QuoteAsset>(
+    self: &MarginManager<BaseAsset, QuoteAsset>,
+    pool: &Pool<BaseAsset, QuoteAsset>,
+): bool {
+    pool.account_exists(&self.balance_manager)
+}
+
+public fun account<BaseAsset, QuoteAsset>(
+    self: &MarginManager<BaseAsset, QuoteAsset>,
+    pool: &Pool<BaseAsset, QuoteAsset>,
+): Account {
+    pool.account(&self.balance_manager)
+}
+
+public fun can_place_limit_order<BaseAsset, QuoteAsset>(
+    self: &MarginManager<BaseAsset, QuoteAsset>,
+    pool: &Pool<BaseAsset, QuoteAsset>,
+    price: u64,
+    quantity: u64,
+    is_bid: bool,
+    pay_with_deep: bool,
+    expire_timestamp: u64,
+    clock: &Clock,
+): bool {
+    pool.can_place_limit_order(
+        &self.balance_manager,
+        price,
+        quantity,
+        is_bid,
+        pay_with_deep,
+        expire_timestamp,
+        clock,
+    )
+}
+
+public fun can_place_market_order<BaseAsset, QuoteAsset>(
+    self: &MarginManager<BaseAsset, QuoteAsset>,
+    pool: &Pool<BaseAsset, QuoteAsset>,
+    quantity: u64,
+    is_bid: bool,
+    pay_with_deep: bool,
+    clock: &Clock,
+): bool {
+    pool.can_place_market_order(
+        &self.balance_manager,
+        quantity,
+        is_bid,
+        pay_with_deep,
+        clock,
+    )
 }
 
 // === Public-Package Functions ===

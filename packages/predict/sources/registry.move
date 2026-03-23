@@ -12,7 +12,8 @@
 /// AdminCap is transferred to the deployer (expected to be a multisig).
 module deepbook_predict::registry;
 
-use deepbook_predict::{oracle::{Self, OracleCapSVI}, predict};
+use deepbook_predict::{oracle::{Self, OracleCapSVI, OracleSVI}, predict};
+use std::string::String;
 use sui::{coin::Coin, event, table::{Self, Table}};
 
 // === Errors ===
@@ -27,6 +28,7 @@ public struct PredictCreated has copy, drop, store {
 public struct OracleCreated has copy, drop, store {
     oracle_id: ID,
     oracle_cap_id: ID,
+    underlying_asset: String,
     expiry: u64,
 }
 
@@ -82,11 +84,7 @@ public fun create_predict<Quote>(
 }
 
 /// Register an additional OracleCapSVI as authorized to update an oracle.
-public fun register_oracle_cap<Underlying>(
-    oracle: &mut oracle::OracleSVI<Underlying>,
-    _admin_cap: &AdminCap,
-    cap: &OracleCapSVI,
-) {
+public fun register_oracle_cap(oracle: &mut OracleSVI, _admin_cap: &AdminCap, cap: &OracleCapSVI) {
     oracle::register_cap(oracle, cap);
 }
 
@@ -96,15 +94,15 @@ public fun create_oracle_cap(_admin_cap: &AdminCap, ctx: &mut TxContext): Oracle
 }
 
 /// Create a new Oracle. Returns the oracle ID.
-/// Underlying is the asset being tracked (e.g., BTC, ETH).
-public fun create_oracle<Underlying>(
+public fun create_oracle(
     registry: &mut Registry,
     _admin_cap: &AdminCap,
     cap: &OracleCapSVI,
+    underlying_asset: String,
     expiry: u64,
     ctx: &mut TxContext,
 ): ID {
-    let oracle_id = oracle::create_oracle<Underlying>(cap, expiry, ctx);
+    let oracle_id = oracle::create_oracle(underlying_asset, expiry, ctx);
     let cap_id = object::id(cap);
 
     if (!registry.oracle_ids.contains(cap_id)) {
@@ -115,6 +113,7 @@ public fun create_oracle<Underlying>(
     event::emit(OracleCreated {
         oracle_id,
         oracle_cap_id: cap_id,
+        underlying_asset,
         expiry,
     });
 
@@ -122,6 +121,7 @@ public fun create_oracle<Underlying>(
 }
 
 /// Admin deposits USDC into the vault.
+/// TODO: source capital from margin pool
 public fun admin_deposit<Quote>(
     predict: &mut predict::Predict<Quote>,
     _admin_cap: &AdminCap,
@@ -137,6 +137,7 @@ public fun admin_deposit<Quote>(
 }
 
 /// Admin withdraws USDC from the vault.
+/// TODO: source capital from margin pool
 public fun admin_withdraw<Quote>(
     predict: &mut predict::Predict<Quote>,
     _admin_cap: &AdminCap,
@@ -168,15 +169,6 @@ public fun set_base_spread<Quote>(
     spread: u64,
 ) {
     predict.set_base_spread(spread);
-}
-
-/// Set max skew multiplier.
-public fun set_max_skew_multiplier<Quote>(
-    predict: &mut predict::Predict<Quote>,
-    _admin_cap: &AdminCap,
-    multiplier: u64,
-) {
-    predict.set_max_skew_multiplier(multiplier);
 }
 
 /// Set utilization multiplier.

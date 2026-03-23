@@ -38,30 +38,34 @@ public fun ln(x: u64): (u64, bool) {
 }
 
 /// Exponential function. Returns e^(±x) in FLOAT_SCALING.
+/// Negative: gracefully returns 0 for large x (result shifts to zero).
+/// Positive: aborts on overflow for x > ~22.9e9 (n > 33). In practice only
+/// called with x_negative=true (discount factor, normal PDF), so this is safe.
 public fun exp(x: u64, x_negative: bool): u64 {
     if (x == 0) return constants::float_scaling!();
 
-    let (r, n) = reduce_exp(x);
+    let (r, mut n) = reduce_exp(x);
     let exp_r = exp_series(r);
 
     if (x_negative) {
-        // e^(-x) = (1/e^r) / 2^n
+        // e^(-x) = (1/e^r) / 2^n; returns 0 if result shifts away
         let mut result = math::div(constants::float_scaling!(), exp_r);
-        let mut j: u64 = 0;
-        while (j < n) {
-            result = result / 2;
-            if (result == 0) return 0;
-            j = j + 1;
-        };
+        if (n >= 32) { result = result >> 32; if (result == 0) return 0; n = n - 32; };
+        if (n >= 16) { result = result >> 16; if (result == 0) return 0; n = n - 16; };
+        if (n >= 8) { result = result >> 8; if (result == 0) return 0; n = n - 8; };
+        if (n >= 4) { result = result >> 4; if (result == 0) return 0; n = n - 4; };
+        if (n >= 2) { result = result >> 2; if (result == 0) return 0; n = n - 2; };
+        if (n >= 1) { result = result >> 1; };
         result
     } else {
-        // e^x = e^r * 2^n
+        // e^x = e^r * 2^n; aborts on u64 overflow (unreachable in current callers)
         let mut result = exp_r;
-        let mut j: u64 = 0;
-        while (j < n) {
-            result = result * 2;
-            j = j + 1;
-        };
+        if (n >= 32) { result = result << 32; n = n - 32; };
+        if (n >= 16) { result = result << 16; n = n - 16; };
+        if (n >= 8) { result = result << 8; n = n - 8; };
+        if (n >= 4) { result = result << 4; n = n - 4; };
+        if (n >= 2) { result = result << 2; n = n - 2; };
+        if (n >= 1) { result = result << 1; };
         result
     }
 }
@@ -97,7 +101,9 @@ fun cdf_pdf(x: u64): u64 {
     math::mul(exp(x_sq_half, true), 398_942_280)
 }
 
-/// A&S polynomial with positive/negative coefficient split.
+/// Abramowitz & Stegun 26.2.17 polynomial for normal CDF approximation.
+/// Coefficients (scaled to 1e9): a1=0.3194, a2=-0.3566, a3=1.7815, a4=-1.8213, a5=1.3303.
+/// Split into pos (a1*t + a3*t³ + a5*t⁵) and neg (a2*t² + a4*t⁴) to avoid signed math.
 fun cdf_poly(t: u64): u64 {
     let t2 = math::mul(t, t);
     let t3 = math::mul(t2, t);
@@ -155,15 +161,20 @@ fun log_ratio(y: u64): u64 {
     math::div(y - constants::float_scaling!(), y + constants::float_scaling!())
 }
 
-/// Normalize x into [FLOAT_SCALING, 2*FLOAT_SCALING) by halving.
+/// Normalize x into [FLOAT_SCALING, 2*FLOAT_SCALING) via binary search.
 /// Returns (y, n) where x = y * 2^n.
 fun normalize(x: u64): (u64, u64) {
     let mut y = x;
     let mut n: u64 = 0;
-    while (y >= 2 * constants::float_scaling!()) {
-        y = y / 2;
-        n = n + 1;
-    };
+    let scale = constants::float_scaling!();
+
+    if (y >> 32 >= scale) { y = y >> 32; n = n + 32; };
+    if (y >> 16 >= scale) { y = y >> 16; n = n + 16; };
+    if (y >> 8 >= scale) { y = y >> 8; n = n + 8; };
+    if (y >> 4 >= scale) { y = y >> 4; n = n + 4; };
+    if (y >> 2 >= scale) { y = y >> 2; n = n + 2; };
+    if (y >> 1 >= scale) { y = y >> 1; n = n + 1; };
+
     (y, n)
 }
 
@@ -197,6 +208,7 @@ public fun add_signed_u64(a: u64, a_neg: bool, b: u64, b_neg: bool): (u64, bool)
 
 public fun mul_signed_u64(a: u64, a_neg: bool, b: u64, b_neg: bool): (u64, bool) {
     let product = math::mul(a, b);
+    if (product == 0) return (0, false);
     let is_negative = a_neg != b_neg; // XOR for sign
     (product, is_negative)
 }

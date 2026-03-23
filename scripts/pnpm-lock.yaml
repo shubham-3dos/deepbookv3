@@ -9,14 +9,11 @@ importers:
   .:
     dependencies:
       '@mysten/deepbook-v3':
-        specifier: ^1.0.9
-        version: 1.0.9(@mysten/sui@2.1.0(typescript@5.9.3))
+        specifier: ^1.2.1
+        version: 1.2.1(@mysten/sui@2.5.0(typescript@5.9.3))
       '@mysten/sui':
-        specifier: ^2.1.0
-        version: 2.1.0(typescript@5.9.3)
-      dotenv:
-        specifier: ^17.3.1
-        version: 17.3.1
+        specifier: ^2.5.0
+        version: 2.5.0(typescript@5.9.3)
       esbuild:
         specifier: ^0.27.2
         version: 0.27.2
@@ -221,24 +218,21 @@ packages:
     peerDependencies:
       graphql: ^0.8.0 || ^0.9.0 || ^0.10.0 || ^0.11.0 || ^0.12.0 || ^0.13.0 || ^14.0.0 || ^15.0.0 || ^16.0.0 || ^17.0.0
 
-  '@mysten/bcs@2.0.1':
-    resolution: {integrity: sha512-/q1uC5Vw/RjXzR4fE9QiIwmTvRx9BstduxkR1j1Z5EbE7ZJynLkFKcJJlXRcnnEytIPcsyiR+TkQixzSbz3msQ==}
-
   '@mysten/bcs@2.0.2':
     resolution: {integrity: sha512-c/nVRPJEV1fRZdKXhysVsy/yCPdiFt7jn6A4/7W2LH1ZPSVPzRkxtLY362D0zaLuBnyT5Y9d9nFLm3ixI8Goug==}
 
-  '@mysten/deepbook-v3@1.0.9':
-    resolution: {integrity: sha512-Q4lijYu3PjGxjCTY+wB6ePfBgmlYPqVtRL3Y41a9Y0RM9BRwbf2fT4OezoPF9kJ6Q5aUdLZQoBHgcUtsy6S4tA==}
+  '@mysten/bcs@2.0.3':
+    resolution: {integrity: sha512-dwcaL4HNAsEGpU3hKUAsXgCZp9l6++e2A3THpzoYZ8e7bsy4XH1V0dXD5dIzgNcVZiZfb6ZnDMG+gdF6+1WOQA==}
+
+  '@mysten/deepbook-v3@1.2.1':
+    resolution: {integrity: sha512-ApqFzXDP7EHEubORcJFQxmT1zS8IPNUcKFo8UiIX/Tdtv/+/YkRB0OvNZvHPLyTcqrNuYUfS4AAhTqSIl+UHIA==}
     engines: {node: '>=22'}
     peerDependencies:
-      '@mysten/sui': ^2.3.2
+      '@mysten/sui': ^2.8.0
 
-  '@mysten/sui@2.1.0':
-    resolution: {integrity: sha512-q1keHOsvNrkfM+rCUHJRFDHagrdr7rCIsNGhM9NrtShAMtCEgCiChuCFGHGVjb3/J2CFj+SxPIG5fEb5bj+9UQ==}
+  '@mysten/sui@2.5.0':
+    resolution: {integrity: sha512-izKz7ZcwmAymFfkW+T46aWFpRGXJttQifJvh84Yw21QmoxLDtOzpMQW+vFsRbvoUJOmJD8gK5VAN4lP/Q7VtMA==}
     engines: {node: '>=22'}
-
-  '@mysten/utils@0.3.0':
-    resolution: {integrity: sha512-paVyFTP+1yHXDO8uorU6YuT1EAIh/GMKXeHbxtGFPJbLzwc5jk1qfUMrks/S7MAwJHMOHcSOx+e2Mwx8ejaIew==}
 
   '@mysten/utils@0.3.1':
     resolution: {integrity: sha512-36KhxG284uhDdSnlkyNaS6fzKTX9FpP2WQWOwUKIRsqQFFIm2ooCf2TP1IuqrtMpkairwpiWkAS0eg7cpemVzg==}
@@ -291,10 +285,6 @@ packages:
   delayed-stream@1.0.0:
     resolution: {integrity: sha512-ZySD7Nf91aLB0RxL4KGrKHBXl7Eds1DAmEdcoVawXnLD7SDhpNgtuII2aAkg7a7QS41jxPSZ17p4VdGnMHk3MQ==}
     engines: {node: '>=0.4.0'}
-
-  dotenv@17.3.1:
-    resolution: {integrity: sha512-IO8C/dzEb6O3F9/twg6ZLXz164a2fhTnEWb95H23Dm4OuN+92NmEAlTrupP9VW6Jm3sO26tQlqyvyi4CsnY9GA==}
-    engines: {node: '>=12'}
 
   dunder-proto@1.0.1:
     resolution: {integrity: sha512-KIN/nDJBQRcXw0MLVhZE9iQHmG68qAVIBg9CqmUYjmQIhgij9U5MFvrqkUL5FbtyyzZuOeOt0zdeRe4UY7ct+A==}
@@ -529,31 +519,31 @@ snapshots:
     dependencies:
       graphql: 16.12.0
 
-  '@mysten/bcs@2.0.1':
-    dependencies:
-      '@mysten/utils': 0.3.0
-      '@scure/base': 2.0.0
-
   '@mysten/bcs@2.0.2':
     dependencies:
       '@mysten/utils': 0.3.1
       '@scure/base': 2.0.0
 
-  '@mysten/deepbook-v3@1.0.9(@mysten/sui@2.1.0(typescript@5.9.3))':
+  '@mysten/bcs@2.0.3':
     dependencies:
-      '@mysten/bcs': 2.0.2
-      '@mysten/sui': 2.1.0(typescript@5.9.3)
+      '@mysten/utils': 0.3.1
+      '@scure/base': 2.0.0
+
+  '@mysten/deepbook-v3@1.2.1(@mysten/sui@2.5.0(typescript@5.9.3))':
+    dependencies:
+      '@mysten/bcs': 2.0.3
+      '@mysten/sui': 2.5.0(typescript@5.9.3)
       '@noble/hashes': 2.0.1
       axios: 1.13.5
       axios-retry: 4.5.0(axios@1.13.5)
     transitivePeerDependencies:
       - debug
 
-  '@mysten/sui@2.1.0(typescript@5.9.3)':
+  '@mysten/sui@2.5.0(typescript@5.9.3)':
     dependencies:
       '@graphql-typed-document-node/core': 3.2.0(graphql@16.12.0)
-      '@mysten/bcs': 2.0.1
-      '@mysten/utils': 0.3.0
+      '@mysten/bcs': 2.0.2
+      '@mysten/utils': 0.3.1
       '@noble/curves': 2.0.1
       '@noble/hashes': 2.0.1
       '@protobuf-ts/grpcweb-transport': 2.11.1
@@ -570,10 +560,6 @@ snapshots:
       - '@gql.tada/svelte-support'
       - '@gql.tada/vue-support'
       - typescript
-
-  '@mysten/utils@0.3.0':
-    dependencies:
-      '@scure/base': 2.0.0
 
   '@mysten/utils@0.3.1':
     dependencies:
@@ -634,8 +620,6 @@ snapshots:
       delayed-stream: 1.0.0
 
   delayed-stream@1.0.0: {}
-
-  dotenv@17.3.1: {}
 
   dunder-proto@1.0.1:
     dependencies:
