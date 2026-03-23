@@ -1,0 +1,10 @@
+[package]
+name = "prediction_market_categorical"
+edition = "2024.beta"
+version = "0.0.1"
+
+[dependencies]
+prediction_markets = { local = "../../" }
+
+[addresses]
+prediction_market_categorical = "0x0"

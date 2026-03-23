@@ -1,0 +1,7 @@
+[package]
+name = "prediction_markets"
+edition = "2024.beta"
+version = "0.0.1"
+
+[addresses]
+prediction_markets = "0x0"
