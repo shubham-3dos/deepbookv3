@@ -4,723 +4,1052 @@
 #[test_only]
 module deepbook_predict::vault_tests;
 
-use deepbook_predict::{constants, vault};
+use deepbook_predict::{constants, generated_oracle as go, oracle, oracle_helper, precision, vault};
 use std::unit_test::{assert_eq, destroy};
-use sui::coin;
+use sui::{balance, clock, sui::SUI};
 
-public struct USDC has drop {}
+const QTY: u64 = 10_000_000; // 10 units at 1e6 quote precision.
+const MAX_EXPOSURE_PCT_80: u64 = 800_000_000; // 80%
+const MAX_EXPOSURE_PCT_50: u64 = 500_000_000; // 50%
 
-/// 1 USDC = 1_000_000 (6 decimals)
-macro fun usdc($amount: u64): u64 {
-    $amount * 1_000_000
+fun create_test_vault(
+    settlement_price: u64,
+    ctx: &mut TxContext,
+): (vault::Vault<SUI>, oracle::OracleSVI, clock::Clock) {
+    let v = vault::new<SUI>(ctx);
+    let oracle = oracle_helper::create_settled_oracle(settlement_price, ctx);
+    let clock = clock::create_for_testing(ctx);
+    (v, oracle, clock)
 }
 
-/// 1 contract = 1_000_000 quote units = $1 at settlement
-macro fun contracts($n: u64): u64 {
-    $n * 1_000_000
+/// Scale an externally generated binary price into MTM for the fixed test quantity.
+/// This does not reimplement vault risk logic; it only converts generated oracle prices
+/// into quote units so tests can compare vault output to independent fixture data.
+fun expected_mtm(sp: &go::StrikePoint, is_up: bool): u64 {
+    let price = if (is_up) sp.expected_up() else sp.expected_dn();
+    (((QTY as u128) * (price as u128) / (constants::float_scaling!() as u128)) as u64)
 }
 
-#[test]
-fun new_vault_empty() {
-    let ctx = &mut tx_context::dummy();
-    let vault = vault::new<USDC>(ctx);
-
-    assert_eq!(vault.balance(), 0);
-    assert_eq!(vault.total_up_short(), 0);
-    assert_eq!(vault.total_down_short(), 0);
-    assert_eq!(vault.max_liability(), 0);
-
-    let (up, down) = vault.oracle_exposure(object::id_from_address(@0x1));
-    assert_eq!(up, 0);
-    assert_eq!(down, 0);
-
-    destroy(vault);
+fun create_generated_oracle(
+    idx: u64,
+    ctx: &mut TxContext,
+): (go::OracleScenario, oracle::OracleSVI, clock::Clock) {
+    let scenario = go::scenarios()[idx];
+    let (oracle, clock) = oracle_helper::create_from_scenario(&scenario, ctx);
+    (scenario, oracle, clock)
 }
 
-#[test]
-fun deposit_increases_balance() {
-    let ctx = &mut tx_context::dummy();
-    let mut vault = vault::new<USDC>(ctx);
-
-    vault.deposit(coin::mint_for_testing<USDC>(usdc!(1_000), ctx));
-    assert_eq!(vault.balance(), usdc!(1_000));
-
-    vault.deposit(coin::mint_for_testing<USDC>(usdc!(500), ctx));
-    assert_eq!(vault.balance(), usdc!(1_500));
-
-    destroy(vault);
+fun create_live_oracle_s0(
+    ctx: &mut TxContext,
+): (go::OracleScenario, oracle::OracleSVI, clock::Clock) {
+    create_generated_oracle(7, ctx)
 }
 
-#[test]
-fun withdraw_decreases_balance() {
-    let ctx = &mut tx_context::dummy();
-    let mut vault = vault::new<USDC>(ctx);
+fun create_live_oracle_s4(
+    ctx: &mut TxContext,
+): (go::OracleScenario, oracle::OracleSVI, clock::Clock) {
+    create_generated_oracle(11, ctx)
+}
 
-    vault.deposit(coin::mint_for_testing<USDC>(usdc!(1_000), ctx));
-    let withdrawn = vault.withdraw(usdc!(400));
-    assert_eq!(vault.balance(), usdc!(600));
-
-    destroy(withdrawn);
-    destroy(vault);
+fun create_live_oracle_s5(
+    ctx: &mut TxContext,
+): (go::OracleScenario, oracle::OracleSVI, clock::Clock) {
+    create_generated_oracle(12, ctx)
 }
 
 #[test]
-fun mint_up_updates_exposure() {
+/// A new vault should start with zero balance, zero MTM, and zero payout liability.
+fun new_vault_initializes_to_zero() {
     let ctx = &mut tx_context::dummy();
-    let mut vault = vault::new<USDC>(ctx);
-    let oracle_1 = object::id_from_address(@0x1);
+    let v = vault::new<SUI>(ctx);
 
-    // Seed vault with $10,000
-    vault.deposit(coin::mint_for_testing<USDC>(usdc!(10_000), ctx));
+    assert_eq!(vault::balance(&v), 0);
+    assert_eq!(vault::total_mtm(&v), 0);
+    assert_eq!(vault::total_max_payout(&v), 0);
+    assert_eq!(vault::vault_value(&v), 0);
 
-    // Mint 100 UP contracts ($100 notional) with $60 payment
-    let qty = contracts!(100);
-    let payment = usdc!(60);
-    vault.execute_mint(oracle_1, true, qty, coin::mint_for_testing<USDC>(payment, ctx));
-
-    assert_eq!(vault.balance(), usdc!(10_000) + payment);
-    assert_eq!(vault.total_up_short(), qty);
-    assert_eq!(vault.total_down_short(), 0);
-
-    let (up, down) = vault.oracle_exposure(oracle_1);
-    assert_eq!(up, qty);
-    assert_eq!(down, 0);
-
-    destroy(vault);
+    destroy(v);
 }
 
 #[test]
-fun mint_down_updates_exposure() {
+/// Accepting payment should increase vault balance by the deposited amount.
+fun accept_payment_increases_balance() {
     let ctx = &mut tx_context::dummy();
-    let mut vault = vault::new<USDC>(ctx);
-    let oracle_1 = object::id_from_address(@0x1);
+    let mut v = vault::new<SUI>(ctx);
 
-    vault.deposit(coin::mint_for_testing<USDC>(usdc!(10_000), ctx));
+    let payment = balance::create_for_testing<SUI>(1_000_000);
+    vault::accept_payment(&mut v, payment);
+    assert_eq!(vault::balance(&v), 1_000_000);
 
-    let qty = contracts!(100);
-    let payment = usdc!(60);
-    vault.execute_mint(oracle_1, false, qty, coin::mint_for_testing<USDC>(payment, ctx));
+    let payment2 = balance::create_for_testing<SUI>(500_000);
+    vault::accept_payment(&mut v, payment2);
+    assert_eq!(vault::balance(&v), 1_500_000);
 
-    assert_eq!(vault.balance(), usdc!(10_000) + payment);
-    assert_eq!(vault.total_up_short(), 0);
-    assert_eq!(vault.total_down_short(), qty);
-
-    let (up, down) = vault.oracle_exposure(oracle_1);
-    assert_eq!(up, 0);
-    assert_eq!(down, qty);
-
-    destroy(vault);
+    destroy(v);
 }
 
 #[test]
-fun mint_multiple_oracles_independent() {
+/// Dispensing payout should split vault balance and reduce stored balance accordingly.
+fun dispense_payout_decreases_balance() {
     let ctx = &mut tx_context::dummy();
-    let mut vault = vault::new<USDC>(ctx);
-    let oracle_1 = object::id_from_address(@0x1);
-    let oracle_2 = object::id_from_address(@0x2);
+    let mut v = vault::new<SUI>(ctx);
 
-    vault.deposit(coin::mint_for_testing<USDC>(usdc!(10_000), ctx));
+    let payment = balance::create_for_testing<SUI>(1_000_000);
+    vault::accept_payment(&mut v, payment);
 
-    let qty_up = contracts!(100);
-    let qty_down = contracts!(200);
-    vault.execute_mint(oracle_1, true, qty_up, coin::mint_for_testing<USDC>(usdc!(50), ctx));
-    vault.execute_mint(oracle_2, false, qty_down, coin::mint_for_testing<USDC>(usdc!(80), ctx));
-
-    assert_eq!(vault.total_up_short(), qty_up);
-    assert_eq!(vault.total_down_short(), qty_down);
-
-    let (up, down) = vault.oracle_exposure(oracle_1);
-    assert_eq!(up, qty_up);
-    assert_eq!(down, 0);
-
-    let (up, down) = vault.oracle_exposure(oracle_2);
-    assert_eq!(up, 0);
-    assert_eq!(down, qty_down);
-
-    destroy(vault);
-}
-
-#[test]
-fun redeem_updates_exposure() {
-    let ctx = &mut tx_context::dummy();
-    let mut vault = vault::new<USDC>(ctx);
-    let oracle_1 = object::id_from_address(@0x1);
-
-    vault.deposit(coin::mint_for_testing<USDC>(usdc!(10_000), ctx));
-
-    let mint_qty = contracts!(100);
-    vault.execute_mint(oracle_1, true, mint_qty, coin::mint_for_testing<USDC>(usdc!(60), ctx));
-
-    let redeem_qty = contracts!(40);
-    let payout_amount = usdc!(30);
-    let payout = vault.execute_redeem(oracle_1, true, redeem_qty, payout_amount);
-
-    assert_eq!(vault.total_up_short(), mint_qty - redeem_qty);
-    let (up, down) = vault.oracle_exposure(oracle_1);
-    assert_eq!(up, mint_qty - redeem_qty);
-    assert_eq!(down, 0);
-    assert_eq!(payout.value(), payout_amount);
+    let payout = vault::dispense_payout(&mut v, 400_000);
+    assert_eq!(vault::balance(&v), 600_000);
+    assert_eq!(payout.value(), 400_000);
 
     destroy(payout);
-    destroy(vault);
+    destroy(v);
 }
 
 #[test, expected_failure(abort_code = vault::EInsufficientBalance)]
-fun redeem_insufficient_balance_aborts() {
+/// Dispensing more than the current balance should abort.
+fun dispense_payout_exceeds_balance_aborts() {
     let ctx = &mut tx_context::dummy();
-    let mut vault = vault::new<USDC>(ctx);
-    let oracle_1 = object::id_from_address(@0x1);
+    let mut v = vault::new<SUI>(ctx);
 
-    vault.deposit(coin::mint_for_testing<USDC>(usdc!(50), ctx));
-    vault.execute_mint(
-        oracle_1,
+    let payment = balance::create_for_testing<SUI>(1_000_000);
+    vault::accept_payment(&mut v, payment);
+
+    let _payout = vault::dispense_payout(&mut v, 1_000_001);
+
+    abort
+}
+
+#[test]
+/// A single winning position should set max payout equal to its contract quantity.
+fun insert_single_position_max_payout() {
+    let ctx = &mut tx_context::dummy();
+    let (mut v, oracle, clock) = create_test_vault(200 * constants::float_scaling!(), ctx);
+
+    vault::insert_position(
+        &mut v,
+        &oracle,
         true,
-        contracts!(100),
-        coin::mint_for_testing<USDC>(usdc!(50), ctx),
+        50 * constants::float_scaling!(),
+        10 * constants::float_scaling!(),
+        &clock,
+        ctx,
     );
-
-    // balance = $100, payout = $101 → should abort
-    let _payout = vault.execute_redeem(oracle_1, true, contracts!(50), usdc!(101));
-
-    abort // unreachable, differs from EInsufficientBalance
-}
-
-#[test, expected_failure]
-fun withdraw_insufficient_balance_aborts() {
-    let ctx = &mut tx_context::dummy();
-    let mut vault = vault::new<USDC>(ctx);
-
-    vault.deposit(coin::mint_for_testing<USDC>(usdc!(100), ctx));
-    let _withdrawn = vault.withdraw(usdc!(101));
-
-    abort
-}
-
-#[test, expected_failure]
-fun redeem_more_than_minted_aborts() {
-    let ctx = &mut tx_context::dummy();
-    let mut vault = vault::new<USDC>(ctx);
-    let oracle_1 = object::id_from_address(@0x1);
-
-    vault.deposit(coin::mint_for_testing<USDC>(usdc!(10_000), ctx));
-    vault.execute_mint(
-        oracle_1,
-        true,
-        contracts!(50),
-        coin::mint_for_testing<USDC>(usdc!(30), ctx),
-    );
-
-    // Redeem 100 contracts but only 50 were minted → arithmetic underflow
-    let _payout = vault.execute_redeem(oracle_1, true, contracts!(100), usdc!(30));
-
-    abort
-}
-
-#[test, expected_failure]
-fun redeem_unknown_oracle_aborts() {
-    let ctx = &mut tx_context::dummy();
-    let mut vault = vault::new<USDC>(ctx);
-    let oracle_1 = object::id_from_address(@0x1);
-    let oracle_unknown = object::id_from_address(@0x99);
-
-    vault.deposit(coin::mint_for_testing<USDC>(usdc!(10_000), ctx));
-    vault.execute_mint(
-        oracle_1,
-        true,
-        contracts!(100),
-        coin::mint_for_testing<USDC>(usdc!(60), ctx),
-    );
-
-    // Redeem against an oracle that was never minted to → table key not found
-    let _payout = vault.execute_redeem(oracle_unknown, true, contracts!(100), usdc!(60));
-
-    abort
-}
-
-#[test]
-fun assert_total_exposure_ok() {
-    let ctx = &mut tx_context::dummy();
-    let mut vault = vault::new<USDC>(ctx);
-    let oracle_1 = object::id_from_address(@0x1);
-    let oracle_2 = object::id_from_address(@0x2);
-
-    // Deposit $10,000
-    vault.deposit(coin::mint_for_testing<USDC>(usdc!(10_000), ctx));
-
-    // Mint 4000 UP + 4000 DOWN contracts → liability = $8,000
-    vault.execute_mint(oracle_1, true, contracts!(4_000), coin::mint_for_testing<USDC>(0, ctx));
-    vault.execute_mint(oracle_2, false, contracts!(4_000), coin::mint_for_testing<USDC>(0, ctx));
-
-    // liability = $8,000, balance = $10,000, 100% limit → 8000 <= 10000
-    vault.assert_total_exposure(constants::float_scaling!());
-
-    destroy(vault);
-}
-
-#[test, expected_failure(abort_code = vault::EExceedsMaxTotalExposure)]
-fun assert_total_exposure_exceeded() {
-    let ctx = &mut tx_context::dummy();
-    let mut vault = vault::new<USDC>(ctx);
-    let oracle_1 = object::id_from_address(@0x1);
-    let oracle_2 = object::id_from_address(@0x2);
-
-    // Deposit $10,000
-    vault.deposit(coin::mint_for_testing<USDC>(usdc!(10_000), ctx));
-
-    // Mint 6000 UP + 6000 DOWN contracts → liability = $12,000
-    vault.execute_mint(oracle_1, true, contracts!(6_000), coin::mint_for_testing<USDC>(0, ctx));
-    vault.execute_mint(oracle_2, false, contracts!(6_000), coin::mint_for_testing<USDC>(0, ctx));
-
-    // liability = $12,000, balance = $10,000, 100% limit → 12000 > 10000
-    vault.assert_total_exposure(constants::float_scaling!());
-
-    abort // unreachable, differs from EExceedsMaxTotalExposure
-}
-
-#[test]
-fun full_cycle_mint_redeem_all() {
-    let ctx = &mut tx_context::dummy();
-    let mut vault = vault::new<USDC>(ctx);
-    let oracle_1 = object::id_from_address(@0x1);
-
-    vault.deposit(coin::mint_for_testing<USDC>(usdc!(10_000), ctx));
-
-    let qty = contracts!(100);
-    let cost = usdc!(60);
-    vault.execute_mint(oracle_1, true, qty, coin::mint_for_testing<USDC>(cost, ctx));
-
-    let payout = vault.execute_redeem(oracle_1, true, qty, cost);
-
-    assert_eq!(vault.total_up_short(), 0);
-    assert_eq!(vault.total_down_short(), 0);
-    assert_eq!(vault.max_liability(), 0);
-
-    let (up, down) = vault.oracle_exposure(oracle_1);
-    assert_eq!(up, 0);
-    assert_eq!(down, 0);
-
-    destroy(payout);
-    destroy(vault);
-}
-
-// === Edge Cases ===
-
-#[test]
-fun mint_zero_quantity_is_noop() {
-    let ctx = &mut tx_context::dummy();
-    let mut vault = vault::new<USDC>(ctx);
-    let oracle = object::id_from_address(@0x1);
-
-    vault.deposit(coin::mint_for_testing<USDC>(usdc!(1_000), ctx));
-    vault.execute_mint(oracle, true, 0, coin::mint_for_testing<USDC>(usdc!(10), ctx));
-
-    // Payment accepted but no exposure added
-    assert_eq!(vault.balance(), usdc!(1_010));
-    assert_eq!(vault.total_up_short(), 0);
-    assert_eq!(vault.max_liability(), 0);
-
-    destroy(vault);
-}
-
-#[test]
-fun redeem_zero_payout_closes_exposure_for_free() {
-    let ctx = &mut tx_context::dummy();
-    let mut vault = vault::new<USDC>(ctx);
-    let oracle = object::id_from_address(@0x1);
-
-    vault.deposit(coin::mint_for_testing<USDC>(usdc!(1_000), ctx));
-    vault.execute_mint(oracle, true, contracts!(50), coin::mint_for_testing<USDC>(usdc!(30), ctx));
-
-    // Redeem all 50 contracts for $0 payout — vault keeps everything
-    let payout = vault.execute_redeem(oracle, true, contracts!(50), 0);
-    assert_eq!(payout.value(), 0);
-    assert_eq!(vault.total_up_short(), 0);
-    assert_eq!(vault.balance(), usdc!(1_030));
-
-    destroy(payout);
-    destroy(vault);
-}
-
-#[test, expected_failure]
-fun redeem_wrong_side_underflows() {
-    let ctx = &mut tx_context::dummy();
-    let mut vault = vault::new<USDC>(ctx);
-    let oracle = object::id_from_address(@0x1);
-
-    vault.deposit(coin::mint_for_testing<USDC>(usdc!(10_000), ctx));
-    vault.execute_mint(oracle, true, contracts!(100), coin::mint_for_testing<USDC>(usdc!(60), ctx));
-
-    // Minted UP but try to redeem DOWN → total_down_short underflow
-    let _payout = vault.execute_redeem(oracle, false, contracts!(50), usdc!(30));
-
-    abort
-}
-
-#[test]
-fun multiple_mints_same_oracle_accumulate() {
-    let ctx = &mut tx_context::dummy();
-    let mut vault = vault::new<USDC>(ctx);
-    let oracle = object::id_from_address(@0x1);
-
-    vault.deposit(coin::mint_for_testing<USDC>(usdc!(10_000), ctx));
-
-    // 3 sequential UP mints on same oracle
-    vault.execute_mint(oracle, true, contracts!(100), coin::mint_for_testing<USDC>(usdc!(50), ctx));
-    vault.execute_mint(oracle, true, contracts!(200), coin::mint_for_testing<USDC>(usdc!(90), ctx));
-    vault.execute_mint(
-        oracle,
-        true,
-        contracts!(300),
-        coin::mint_for_testing<USDC>(usdc!(130), ctx),
-    );
-
-    assert_eq!(vault.total_up_short(), contracts!(600));
-    let (up, down) = vault.oracle_exposure(oracle);
-    assert_eq!(up, contracts!(600));
-    assert_eq!(down, 0);
-
-    destroy(vault);
-}
-
-#[test]
-fun same_oracle_up_and_down() {
-    let ctx = &mut tx_context::dummy();
-    let mut vault = vault::new<USDC>(ctx);
-    let oracle = object::id_from_address(@0x1);
-
-    vault.deposit(coin::mint_for_testing<USDC>(usdc!(10_000), ctx));
-
-    vault.execute_mint(oracle, true, contracts!(100), coin::mint_for_testing<USDC>(usdc!(60), ctx));
-    vault.execute_mint(oracle, false, contracts!(70), coin::mint_for_testing<USDC>(usdc!(40), ctx));
-
-    assert_eq!(vault.total_up_short(), contracts!(100));
-    assert_eq!(vault.total_down_short(), contracts!(70));
-    assert_eq!(vault.max_liability(), contracts!(170));
-
-    let (up, down) = vault.oracle_exposure(oracle);
-    assert_eq!(up, contracts!(100));
-    assert_eq!(down, contracts!(70));
-
-    destroy(vault);
-}
-
-#[test]
-fun exposure_check_at_exact_boundary() {
-    let ctx = &mut tx_context::dummy();
-    let mut vault = vault::new<USDC>(ctx);
-    let oracle = object::id_from_address(@0x1);
-
-    // Deposit $100, mint $100 of contracts (liability == balance at 100%)
-    vault.deposit(coin::mint_for_testing<USDC>(usdc!(100), ctx));
-    vault.execute_mint(oracle, true, usdc!(100), coin::mint_for_testing<USDC>(0, ctx));
-
-    // liability = 100, balance = 100, 100% limit → 100 <= mul(100, 1e9) = 100
-    vault.assert_total_exposure(constants::float_scaling!());
-
-    destroy(vault);
-}
-
-#[test, expected_failure(abort_code = vault::EExceedsMaxTotalExposure)]
-fun exposure_check_one_unit_over() {
-    let ctx = &mut tx_context::dummy();
-    let mut vault = vault::new<USDC>(ctx);
-    let oracle = object::id_from_address(@0x1);
-
-    vault.deposit(coin::mint_for_testing<USDC>(usdc!(100), ctx));
-    // liability = 100_000_001 > balance * 100% = 100_000_000
-    vault.execute_mint(oracle, true, usdc!(100) + 1, coin::mint_for_testing<USDC>(0, ctx));
-
-    vault.assert_total_exposure(constants::float_scaling!());
-
-    abort
-}
-
-#[test]
-fun exposure_check_half_limit() {
-    let ctx = &mut tx_context::dummy();
-    let mut vault = vault::new<USDC>(ctx);
-    let oracle = object::id_from_address(@0x1);
-
-    // $1000 balance, $400 liability, 50% limit
-    vault.deposit(coin::mint_for_testing<USDC>(usdc!(1_000), ctx));
-    vault.execute_mint(oracle, true, usdc!(400), coin::mint_for_testing<USDC>(0, ctx));
-
-    let half = constants::float_scaling!() / 2; // 50%
-    // liability 400 <= mul(1000, 0.5) = 500
-    vault.assert_total_exposure(half);
-
-    destroy(vault);
-}
-
-#[test, expected_failure(abort_code = vault::EExceedsMaxTotalExposure)]
-fun exposure_check_half_limit_exceeded() {
-    let ctx = &mut tx_context::dummy();
-    let mut vault = vault::new<USDC>(ctx);
-    let oracle = object::id_from_address(@0x1);
-
-    // $1000 balance, $600 liability, 50% limit
-    vault.deposit(coin::mint_for_testing<USDC>(usdc!(1_000), ctx));
-    vault.execute_mint(oracle, true, usdc!(600), coin::mint_for_testing<USDC>(0, ctx));
-
-    let half = constants::float_scaling!() / 2;
-    // liability 600 > mul(1000, 0.5) = 500
-    vault.assert_total_exposure(half);
-
-    abort
-}
-
-#[test]
-fun exposure_check_zero_balance_zero_liability() {
-    let ctx = &mut tx_context::dummy();
-    let vault = vault::new<USDC>(ctx);
-
-    // Empty vault: liability 0 <= mul(0, pct) = 0
-    vault.assert_total_exposure(constants::float_scaling!());
-
-    destroy(vault);
-}
-
-#[test, expected_failure(abort_code = vault::EExceedsMaxTotalExposure)]
-fun exposure_check_zero_pct_with_any_liability() {
-    let ctx = &mut tx_context::dummy();
-    let mut vault = vault::new<USDC>(ctx);
-    let oracle = object::id_from_address(@0x1);
-
-    vault.deposit(coin::mint_for_testing<USDC>(usdc!(10_000), ctx));
-    vault.execute_mint(oracle, true, 1, coin::mint_for_testing<USDC>(0, ctx));
-
-    // 0% limit: even 1 unit of liability fails
-    vault.assert_total_exposure(0);
-
-    abort
-}
-
-#[test]
-fun withdraw_exact_full_balance() {
-    let ctx = &mut tx_context::dummy();
-    let mut vault = vault::new<USDC>(ctx);
-
-    vault.deposit(coin::mint_for_testing<USDC>(usdc!(500), ctx));
-    let withdrawn = vault.withdraw(usdc!(500));
-
-    assert_eq!(vault.balance(), 0);
-    assert_eq!(withdrawn.value(), usdc!(500));
-
-    destroy(withdrawn);
-    destroy(vault);
-}
-
-#[test]
-fun deposit_zero_coin() {
-    let ctx = &mut tx_context::dummy();
-    let mut vault = vault::new<USDC>(ctx);
-
-    vault.deposit(coin::mint_for_testing<USDC>(0, ctx));
-    assert_eq!(vault.balance(), 0);
-
-    destroy(vault);
-}
-
-#[test]
-fun withdraw_zero() {
-    let ctx = &mut tx_context::dummy();
-    let mut vault = vault::new<USDC>(ctx);
-
-    vault.deposit(coin::mint_for_testing<USDC>(usdc!(100), ctx));
-    let withdrawn = vault.withdraw(0);
-
-    assert_eq!(vault.balance(), usdc!(100));
-    assert_eq!(withdrawn.value(), 0);
-
-    destroy(withdrawn);
-    destroy(vault);
-}
-
-#[test]
-fun redeem_drains_vault_to_exactly_zero() {
-    let ctx = &mut tx_context::dummy();
-    let mut vault = vault::new<USDC>(ctx);
-    let oracle = object::id_from_address(@0x1);
-
-    vault.deposit(coin::mint_for_testing<USDC>(usdc!(100), ctx));
-    vault.execute_mint(oracle, true, contracts!(100), coin::mint_for_testing<USDC>(0, ctx));
-
-    // Payout the entire balance
-    let payout = vault.execute_redeem(oracle, true, contracts!(100), usdc!(100));
-    assert_eq!(vault.balance(), 0);
-    assert_eq!(payout.value(), usdc!(100));
-
-    destroy(payout);
-    destroy(vault);
-}
-
-#[test, expected_failure(abort_code = vault::EInsufficientBalance)]
-fun redeem_one_over_balance_aborts() {
-    let ctx = &mut tx_context::dummy();
-    let mut vault = vault::new<USDC>(ctx);
-    let oracle = object::id_from_address(@0x1);
-
-    vault.deposit(coin::mint_for_testing<USDC>(usdc!(100), ctx));
-    vault.execute_mint(oracle, true, contracts!(200), coin::mint_for_testing<USDC>(0, ctx));
-
-    // balance = 100, payout = 100 + 1 — exactly one unit over
-    let _payout = vault.execute_redeem(oracle, true, contracts!(100), usdc!(100) + 1);
-
-    abort
-}
-
-#[test]
-fun partial_redeems_track_exposure_correctly() {
-    let ctx = &mut tx_context::dummy();
-    let mut vault = vault::new<USDC>(ctx);
-    let oracle = object::id_from_address(@0x1);
-
-    vault.deposit(coin::mint_for_testing<USDC>(usdc!(10_000), ctx));
-    vault.execute_mint(
-        oracle,
+    assert_eq!(vault::total_max_payout(&v), 10 * constants::float_scaling!());
+
+    vault::insert_position(
+        &mut v,
+        &oracle,
         false,
-        contracts!(500),
-        coin::mint_for_testing<USDC>(usdc!(250), ctx),
+        50 * constants::float_scaling!(),
+        8 * constants::float_scaling!(),
+        &clock,
+        ctx,
     );
+    assert_eq!(vault::total_max_payout(&v), 10 * constants::float_scaling!());
 
-    // Redeem in 3 chunks
-    let p1 = vault.execute_redeem(oracle, false, contracts!(100), usdc!(40));
-    let p2 = vault.execute_redeem(oracle, false, contracts!(150), usdc!(60));
-    let p3 = vault.execute_redeem(oracle, false, contracts!(250), usdc!(100));
-
-    assert_eq!(vault.total_down_short(), 0);
-    let (up, down) = vault.oracle_exposure(oracle);
-    assert_eq!(up, 0);
-    assert_eq!(down, 0);
-
-    destroy(p1);
-    destroy(p2);
-    destroy(p3);
-    destroy(vault);
+    destroy(v);
+    destroy(oracle);
+    destroy(clock);
 }
 
 #[test]
-fun max_liability_is_sum_of_both_sides() {
+/// Opposite-direction exposure at the same strike should use the larger directional payout.
+fun insert_same_strike_dn_exceeds_up_max_payout() {
     let ctx = &mut tx_context::dummy();
-    let mut vault = vault::new<USDC>(ctx);
-    let oracle_a = object::id_from_address(@0xA);
-    let oracle_b = object::id_from_address(@0xB);
-    let oracle_c = object::id_from_address(@0xC);
+    let (mut v, oracle, clock) = create_test_vault(200 * constants::float_scaling!(), ctx);
 
-    vault.deposit(coin::mint_for_testing<USDC>(usdc!(100_000), ctx));
+    vault::insert_position(
+        &mut v,
+        &oracle,
+        true,
+        50 * constants::float_scaling!(),
+        5 * constants::float_scaling!(),
+        &clock,
+        ctx,
+    );
+    vault::insert_position(
+        &mut v,
+        &oracle,
+        false,
+        50 * constants::float_scaling!(),
+        12 * constants::float_scaling!(),
+        &clock,
+        ctx,
+    );
 
-    vault.execute_mint(oracle_a, true, contracts!(1_000), coin::mint_for_testing<USDC>(0, ctx));
-    vault.execute_mint(oracle_b, false, contracts!(2_000), coin::mint_for_testing<USDC>(0, ctx));
-    vault.execute_mint(oracle_c, true, contracts!(3_000), coin::mint_for_testing<USDC>(0, ctx));
+    assert_eq!(vault::total_max_payout(&v), 12 * constants::float_scaling!());
 
-    // max_liability = total_up + total_down = 4000 + 2000 = 6000
-    assert_eq!(vault.total_up_short(), contracts!(4_000));
-    assert_eq!(vault.total_down_short(), contracts!(2_000));
-    assert_eq!(vault.max_liability(), contracts!(6_000));
-
-    destroy(vault);
+    destroy(v);
+    destroy(oracle);
+    destroy(clock);
 }
 
-#[test, expected_failure]
-fun large_mint_overflows_total_short() {
+#[test]
+/// Winning exposure across two UP strikes should add linearly in the settled step curve.
+fun insert_different_strikes_max_payout() {
     let ctx = &mut tx_context::dummy();
-    let mut vault = vault::new<USDC>(ctx);
-    let oracle = object::id_from_address(@0x1);
+    let (mut v, oracle, clock) = create_test_vault(200 * constants::float_scaling!(), ctx);
 
-    vault.deposit(coin::mint_for_testing<USDC>(usdc!(1), ctx));
+    vault::insert_position(
+        &mut v,
+        &oracle,
+        true,
+        30 * constants::float_scaling!(),
+        5 * constants::float_scaling!(),
+        &clock,
+        ctx,
+    );
+    vault::insert_position(
+        &mut v,
+        &oracle,
+        true,
+        70 * constants::float_scaling!(),
+        5 * constants::float_scaling!(),
+        &clock,
+        ctx,
+    );
 
-    let half_max = 9_223_372_036_854_775_808; // 2^63
-    vault.execute_mint(oracle, true, half_max, coin::mint_for_testing<USDC>(0, ctx));
-    // Second mint overflows total_up_short
-    vault.execute_mint(oracle, true, half_max, coin::mint_for_testing<USDC>(0, ctx));
+    assert_eq!(vault::total_max_payout(&v), 10 * constants::float_scaling!());
+
+    destroy(v);
+    destroy(oracle);
+    destroy(clock);
+}
+
+#[test]
+/// Mixed-direction winning exposure across different strikes should add into total payout.
+fun insert_different_strikes_mixed_directions_max_payout() {
+    let ctx = &mut tx_context::dummy();
+    let (mut v, oracle, clock) = create_test_vault(200 * constants::float_scaling!(), ctx);
+
+    vault::insert_position(
+        &mut v,
+        &oracle,
+        true,
+        30 * constants::float_scaling!(),
+        8 * constants::float_scaling!(),
+        &clock,
+        ctx,
+    );
+    vault::insert_position(
+        &mut v,
+        &oracle,
+        false,
+        70 * constants::float_scaling!(),
+        6 * constants::float_scaling!(),
+        &clock,
+        ctx,
+    );
+
+    assert_eq!(vault::total_max_payout(&v), 14 * constants::float_scaling!());
+
+    destroy(v);
+    destroy(oracle);
+    destroy(clock);
+}
+
+#[test]
+/// Removing part of a settled winning position should reduce both MTM and max payout.
+fun remove_position_decreases_max_payout_and_mtm() {
+    let ctx = &mut tx_context::dummy();
+    let (mut v, oracle, clock) = create_test_vault(200 * constants::float_scaling!(), ctx);
+
+    vault::insert_position(
+        &mut v,
+        &oracle,
+        true,
+        50 * constants::float_scaling!(),
+        10 * constants::float_scaling!(),
+        &clock,
+        ctx,
+    );
+    assert_eq!(vault::total_max_payout(&v), 10 * constants::float_scaling!());
+    assert_eq!(vault::total_mtm(&v), 10 * constants::float_scaling!());
+
+    vault::remove_position(
+        &mut v,
+        &oracle,
+        true,
+        50 * constants::float_scaling!(),
+        4 * constants::float_scaling!(),
+        &clock,
+    );
+    assert_eq!(vault::total_max_payout(&v), 6 * constants::float_scaling!());
+    assert_eq!(vault::total_mtm(&v), 6 * constants::float_scaling!());
+
+    destroy(v);
+    destroy(oracle);
+    destroy(clock);
+}
+
+#[test]
+/// Removing the full position should clear cached payout liability for that oracle.
+fun remove_all_positions_returns_max_payout_to_zero() {
+    let ctx = &mut tx_context::dummy();
+    let (mut v, oracle, clock) = create_test_vault(200 * constants::float_scaling!(), ctx);
+
+    vault::insert_position(
+        &mut v,
+        &oracle,
+        true,
+        50 * constants::float_scaling!(),
+        10 * constants::float_scaling!(),
+        &clock,
+        ctx,
+    );
+    vault::remove_position(
+        &mut v,
+        &oracle,
+        true,
+        50 * constants::float_scaling!(),
+        10 * constants::float_scaling!(),
+        &clock,
+    );
+
+    assert_eq!(vault::total_max_payout(&v), 0);
+
+    destroy(v);
+    destroy(oracle);
+    destroy(clock);
+}
+
+#[test, expected_failure(abort_code = vault::EOracleExposureNotFound)]
+/// Removing exposure for an oracle with no tracked treap should abort.
+fun remove_from_nonexistent_oracle_aborts() {
+    let ctx = &mut tx_context::dummy();
+    let (mut v, oracle, clock) = create_test_vault(200 * constants::float_scaling!(), ctx);
+
+    vault::remove_position(
+        &mut v,
+        &oracle,
+        true,
+        50 * constants::float_scaling!(),
+        5 * constants::float_scaling!(),
+        &clock,
+    );
 
     abort
 }
 
 #[test]
-fun mint_and_redeem_across_many_oracles() {
+/// Total exposure check should pass when MTM stays below the configured percentage of balance.
+fun assert_total_exposure_passes_when_within_limit() {
     let ctx = &mut tx_context::dummy();
-    let mut vault = vault::new<USDC>(ctx);
+    let (mut v, oracle, clock) = create_test_vault(200 * constants::float_scaling!(), ctx);
 
-    vault.deposit(coin::mint_for_testing<USDC>(usdc!(100_000), ctx));
+    let payment = balance::create_for_testing<SUI>(100 * constants::float_scaling!());
+    vault::accept_payment(&mut v, payment);
 
-    // Mint across 5 oracles
-    let oracle_1 = object::id_from_address(@0x1);
-    let oracle_2 = object::id_from_address(@0x2);
-    let oracle_3 = object::id_from_address(@0x3);
-    let oracle_4 = object::id_from_address(@0x4);
-    let oracle_5 = object::id_from_address(@0x5);
-
-    vault.execute_mint(oracle_1, true, contracts!(100), coin::mint_for_testing<USDC>(0, ctx));
-    vault.execute_mint(oracle_2, false, contracts!(200), coin::mint_for_testing<USDC>(0, ctx));
-    vault.execute_mint(oracle_3, true, contracts!(300), coin::mint_for_testing<USDC>(0, ctx));
-    vault.execute_mint(oracle_4, false, contracts!(400), coin::mint_for_testing<USDC>(0, ctx));
-    vault.execute_mint(oracle_5, true, contracts!(500), coin::mint_for_testing<USDC>(0, ctx));
-
-    assert_eq!(vault.total_up_short(), contracts!(900));
-    assert_eq!(vault.total_down_short(), contracts!(600));
-
-    // Redeem all from oracle_3 and oracle_4
-    let p1 = vault.execute_redeem(oracle_3, true, contracts!(300), usdc!(100));
-    let p2 = vault.execute_redeem(oracle_4, false, contracts!(400), usdc!(100));
-
-    assert_eq!(vault.total_up_short(), contracts!(600));
-    assert_eq!(vault.total_down_short(), contracts!(200));
-
-    // Verify per-oracle isolation: oracle_1 untouched
-    let (up, down) = vault.oracle_exposure(oracle_1);
-    assert_eq!(up, contracts!(100));
-    assert_eq!(down, 0);
-
-    // oracle_3 fully redeemed
-    let (up, down) = vault.oracle_exposure(oracle_3);
-    assert_eq!(up, 0);
-    assert_eq!(down, 0);
-
-    destroy(p1);
-    destroy(p2);
-    destroy(vault);
-}
-
-#[test]
-fun exposure_check_with_mint_payments_included() {
-    let ctx = &mut tx_context::dummy();
-    let mut vault = vault::new<USDC>(ctx);
-    let oracle = object::id_from_address(@0x1);
-
-    // No deposit — balance comes entirely from mint payment
-    vault.execute_mint(
-        oracle,
+    vault::insert_position(
+        &mut v,
+        &oracle,
         true,
-        usdc!(800),
-        coin::mint_for_testing<USDC>(usdc!(1_000), ctx),
+        50 * constants::float_scaling!(),
+        10 * constants::float_scaling!(),
+        &clock,
+        ctx,
     );
 
-    // 100% limit: 800 <= 1000
-    vault.assert_total_exposure(constants::float_scaling!());
+    vault::assert_total_exposure(&v, MAX_EXPOSURE_PCT_80);
 
-    // 80% limit: 800 <= mul(1000, 0.8) = 800 (exact boundary)
-    vault.assert_total_exposure(constants::default_max_total_exposure_pct!());
-
-    destroy(vault);
+    destroy(v);
+    destroy(oracle);
+    destroy(clock);
 }
 
 #[test, expected_failure(abort_code = vault::EExceedsMaxTotalExposure)]
-fun exposure_check_payment_not_enough_for_default_limit() {
+/// Total exposure check should fail when MTM exceeds the configured budget.
+fun assert_total_exposure_fails_when_exceeds_limit() {
     let ctx = &mut tx_context::dummy();
-    let mut vault = vault::new<USDC>(ctx);
-    let oracle = object::id_from_address(@0x1);
+    let (mut v, oracle, clock) = create_test_vault(200 * constants::float_scaling!(), ctx);
 
-    // balance = $1000 from payment, liability = $801
-    vault.execute_mint(
-        oracle,
+    let payment = balance::create_for_testing<SUI>(10 * constants::float_scaling!());
+    vault::accept_payment(&mut v, payment);
+
+    vault::insert_position(
+        &mut v,
+        &oracle,
         true,
-        usdc!(801),
-        coin::mint_for_testing<USDC>(usdc!(1_000), ctx),
+        50 * constants::float_scaling!(),
+        10 * constants::float_scaling!(),
+        &clock,
+        ctx,
     );
 
-    // 80% limit: 801 > mul(1000, 0.8) = 800
-    vault.assert_total_exposure(constants::default_max_total_exposure_pct!());
+    vault::assert_total_exposure(&v, MAX_EXPOSURE_PCT_50);
 
     abort
+}
+
+#[test]
+/// Total exposure should pass exactly on the 100% utilization boundary.
+fun assert_total_exposure_passes_at_exact_boundary() {
+    let ctx = &mut tx_context::dummy();
+    let (mut v, oracle, clock) = create_test_vault(200 * constants::float_scaling!(), ctx);
+
+    let payment = balance::create_for_testing<SUI>(10 * constants::float_scaling!());
+    vault::accept_payment(&mut v, payment);
+
+    vault::insert_position(
+        &mut v,
+        &oracle,
+        true,
+        50 * constants::float_scaling!(),
+        10 * constants::float_scaling!(),
+        &clock,
+        ctx,
+    );
+
+    vault::assert_total_exposure(&v, constants::float_scaling!());
+
+    destroy(v);
+    destroy(oracle);
+    destroy(clock);
+}
+
+#[test]
+/// Vault value is free balance after subtracting cached MTM liability.
+fun vault_value_equals_balance_minus_mtm() {
+    let ctx = &mut tx_context::dummy();
+    let (mut v, oracle, clock) = create_test_vault(200 * constants::float_scaling!(), ctx);
+
+    let payment = balance::create_for_testing<SUI>(100 * constants::float_scaling!());
+    vault::accept_payment(&mut v, payment);
+
+    vault::insert_position(
+        &mut v,
+        &oracle,
+        true,
+        50 * constants::float_scaling!(),
+        10 * constants::float_scaling!(),
+        &clock,
+        ctx,
+    );
+
+    assert_eq!(vault::vault_value(&v), 90 * constants::float_scaling!());
+
+    destroy(v);
+    destroy(oracle);
+    destroy(clock);
+}
+
+#[test]
+/// Vault value should be exactly zero when balance matches cached MTM liability.
+fun vault_value_zero_at_exact_mtm_boundary() {
+    let ctx = &mut tx_context::dummy();
+    let (mut v, oracle, clock) = create_test_vault(200 * constants::float_scaling!(), ctx);
+
+    let payment = balance::create_for_testing<SUI>(10 * constants::float_scaling!());
+    vault::accept_payment(&mut v, payment);
+
+    vault::insert_position(
+        &mut v,
+        &oracle,
+        true,
+        50 * constants::float_scaling!(),
+        10 * constants::float_scaling!(),
+        &clock,
+        ctx,
+    );
+
+    assert_eq!(vault::vault_value(&v), 0);
+
+    destroy(v);
+    destroy(oracle);
+    destroy(clock);
+}
+
+#[test]
+/// Losing settled exposure contributes zero MTM, so vault value equals raw balance.
+fun vault_value_zero_mtm() {
+    let ctx = &mut tx_context::dummy();
+    let (mut v, oracle, clock) = create_test_vault(10 * constants::float_scaling!(), ctx);
+
+    let payment = balance::create_for_testing<SUI>(100 * constants::float_scaling!());
+    vault::accept_payment(&mut v, payment);
+
+    vault::insert_position(
+        &mut v,
+        &oracle,
+        true,
+        50 * constants::float_scaling!(),
+        10 * constants::float_scaling!(),
+        &clock,
+        ctx,
+    );
+
+    assert_eq!(vault::total_mtm(&v), 0);
+    assert_eq!(vault::vault_value(&v), 100 * constants::float_scaling!());
+
+    destroy(v);
+    destroy(oracle);
+    destroy(clock);
+}
+
+#[test, expected_failure(abort_code = vault::EMtmExceedsBalance)]
+/// Vault value should abort when cached MTM exceeds available balance.
+fun vault_value_aborts_when_mtm_exceeds_balance() {
+    let ctx = &mut tx_context::dummy();
+    let (mut v, oracle, clock) = create_test_vault(200 * constants::float_scaling!(), ctx);
+
+    let payment = balance::create_for_testing<SUI>(5 * constants::float_scaling!());
+    vault::accept_payment(&mut v, payment);
+
+    vault::insert_position(
+        &mut v,
+        &oracle,
+        true,
+        50 * constants::float_scaling!(),
+        10 * constants::float_scaling!(),
+        &clock,
+        ctx,
+    );
+
+    let _val = vault::vault_value(&v);
+
+    abort
+}
+
+#[test, expected_failure(abort_code = vault::EExceedsMaxTotalExposure)]
+/// Any nonzero liability should fail the exposure check when vault balance is zero.
+fun assert_total_exposure_zero_balance_with_liability_fails() {
+    let ctx = &mut tx_context::dummy();
+    let (mut v, oracle, clock) = create_test_vault(200 * constants::float_scaling!(), ctx);
+
+    vault::insert_position(
+        &mut v,
+        &oracle,
+        true,
+        50 * constants::float_scaling!(),
+        10 * constants::float_scaling!(),
+        &clock,
+        ctx,
+    );
+
+    vault::assert_total_exposure(&v, MAX_EXPOSURE_PCT_80);
+
+    abort
+}
+
+#[test]
+/// A settled DOWN position wins when settlement is below strike.
+fun mtm_dn_wins_settled_below_strike() {
+    let ctx = &mut tx_context::dummy();
+    let (mut v, oracle, clock) = create_test_vault(30 * constants::float_scaling!(), ctx);
+
+    vault::insert_position(
+        &mut v,
+        &oracle,
+        false,
+        50 * constants::float_scaling!(),
+        8 * constants::float_scaling!(),
+        &clock,
+        ctx,
+    );
+
+    assert_eq!(vault::total_mtm(&v), 8 * constants::float_scaling!());
+
+    destroy(v);
+    destroy(oracle);
+    destroy(clock);
+}
+
+#[test]
+/// A settled DOWN position loses when settlement is above strike.
+fun mtm_dn_loses_settled_above_strike() {
+    let ctx = &mut tx_context::dummy();
+    let (mut v, oracle, clock) = create_test_vault(200 * constants::float_scaling!(), ctx);
+
+    vault::insert_position(
+        &mut v,
+        &oracle,
+        false,
+        50 * constants::float_scaling!(),
+        8 * constants::float_scaling!(),
+        &clock,
+        ctx,
+    );
+
+    assert_eq!(vault::total_mtm(&v), 0);
+
+    destroy(v);
+    destroy(oracle);
+    destroy(clock);
+}
+
+#[test]
+/// Multiple settled winning positions should accumulate MTM across strikes.
+fun mtm_multiple_positions_both_win() {
+    let ctx = &mut tx_context::dummy();
+    let (mut v, oracle, clock) = create_test_vault(200 * constants::float_scaling!(), ctx);
+
+    vault::insert_position(
+        &mut v,
+        &oracle,
+        true,
+        50 * constants::float_scaling!(),
+        5 * constants::float_scaling!(),
+        &clock,
+        ctx,
+    );
+    vault::insert_position(
+        &mut v,
+        &oracle,
+        true,
+        80 * constants::float_scaling!(),
+        7 * constants::float_scaling!(),
+        &clock,
+        ctx,
+    );
+
+    assert_eq!(vault::total_mtm(&v), 12 * constants::float_scaling!());
+
+    destroy(v);
+    destroy(oracle);
+    destroy(clock);
+}
+
+#[test]
+/// Mixed settled UP and DOWN winners should both contribute to total MTM.
+fun mtm_mixed_directions_settled() {
+    let ctx = &mut tx_context::dummy();
+    let (mut v, oracle, clock) = create_test_vault(60 * constants::float_scaling!(), ctx);
+
+    vault::insert_position(
+        &mut v,
+        &oracle,
+        true,
+        50 * constants::float_scaling!(),
+        10 * constants::float_scaling!(),
+        &clock,
+        ctx,
+    );
+    vault::insert_position(
+        &mut v,
+        &oracle,
+        false,
+        70 * constants::float_scaling!(),
+        6 * constants::float_scaling!(),
+        &clock,
+        ctx,
+    );
+
+    assert_eq!(vault::total_mtm(&v), 16 * constants::float_scaling!());
+
+    destroy(v);
+    destroy(oracle);
+    destroy(clock);
+}
+
+#[test]
+/// Inserting and then partially removing settled exposure should keep cached aggregates consistent.
+fun insert_and_remove_lifecycle() {
+    let ctx = &mut tx_context::dummy();
+    let mut v = vault::new<SUI>(ctx);
+    let clock = clock::create_for_testing(ctx);
+
+    let payment = balance::create_for_testing<SUI>(100 * constants::float_scaling!());
+    vault::accept_payment(&mut v, payment);
+
+    let oracle = oracle_helper::create_settled_oracle(200 * constants::float_scaling!(), ctx);
+
+    vault::insert_position(
+        &mut v,
+        &oracle,
+        true,
+        30 * constants::float_scaling!(),
+        5 * constants::float_scaling!(),
+        &clock,
+        ctx,
+    );
+    vault::insert_position(
+        &mut v,
+        &oracle,
+        true,
+        50 * constants::float_scaling!(),
+        10 * constants::float_scaling!(),
+        &clock,
+        ctx,
+    );
+    vault::insert_position(
+        &mut v,
+        &oracle,
+        true,
+        70 * constants::float_scaling!(),
+        8 * constants::float_scaling!(),
+        &clock,
+        ctx,
+    );
+
+    assert_eq!(vault::total_mtm(&v), 23 * constants::float_scaling!());
+    assert_eq!(vault::total_max_payout(&v), 23 * constants::float_scaling!());
+    assert_eq!(vault::vault_value(&v), 77 * constants::float_scaling!());
+
+    vault::remove_position(
+        &mut v,
+        &oracle,
+        true,
+        50 * constants::float_scaling!(),
+        10 * constants::float_scaling!(),
+        &clock,
+    );
+
+    assert_eq!(vault::total_mtm(&v), 13 * constants::float_scaling!());
+    assert_eq!(vault::total_max_payout(&v), 13 * constants::float_scaling!());
+    assert_eq!(vault::vault_value(&v), 87 * constants::float_scaling!());
+
+    destroy(v);
+    destroy(oracle);
+    destroy(clock);
+}
+
+#[test]
+/// UP binary settles strictly above strike, so equality should produce zero UP payout.
+fun mtm_at_settlement_boundary() {
+    let ctx = &mut tx_context::dummy();
+    let mut v = vault::new<SUI>(ctx);
+    let clock = clock::create_for_testing(ctx);
+
+    let settlement = 50 * constants::float_scaling!();
+    let oracle = oracle_helper::create_settled_oracle(settlement, ctx);
+
+    vault::insert_position(
+        &mut v,
+        &oracle,
+        true,
+        settlement,
+        10 * constants::float_scaling!(),
+        &clock,
+        ctx,
+    );
+    assert_eq!(vault::total_mtm(&v), 0);
+
+    destroy(v);
+    destroy(oracle);
+    destroy(clock);
+}
+
+#[test]
+/// DOWN binary wins at the settlement boundary because UP requires settlement > strike.
+fun mtm_dn_wins_at_settlement_boundary() {
+    let ctx = &mut tx_context::dummy();
+    let mut v = vault::new<SUI>(ctx);
+    let clock = clock::create_for_testing(ctx);
+
+    let settlement = 50 * constants::float_scaling!();
+    let oracle = oracle_helper::create_settled_oracle(settlement, ctx);
+
+    vault::insert_position(
+        &mut v,
+        &oracle,
+        false,
+        settlement,
+        10 * constants::float_scaling!(),
+        &clock,
+        ctx,
+    );
+    assert_eq!(vault::total_mtm(&v), 10 * constants::float_scaling!());
+
+    destroy(v);
+    destroy(oracle);
+    destroy(clock);
+}
+
+#[test]
+/// Empty vault should trivially satisfy total exposure checks.
+fun assert_total_exposure_with_empty_vault() {
+    let ctx = &mut tx_context::dummy();
+    let v = vault::new<SUI>(ctx);
+
+    vault::assert_total_exposure(&v, MAX_EXPOSURE_PCT_80);
+
+    destroy(v);
+}
+
+#[test]
+/// Removing one oracle's positions should not disturb cached risk for another oracle.
+fun remove_from_one_oracle_does_not_affect_other() {
+    let ctx = &mut tx_context::dummy();
+    let mut v = vault::new<SUI>(ctx);
+    let clock = clock::create_for_testing(ctx);
+
+    let oracle1 = oracle_helper::create_settled_oracle(200 * constants::float_scaling!(), ctx);
+    let oracle2 = oracle_helper::create_settled_oracle(10 * constants::float_scaling!(), ctx);
+
+    vault::insert_position(
+        &mut v,
+        &oracle1,
+        true,
+        50 * constants::float_scaling!(),
+        5 * constants::float_scaling!(),
+        &clock,
+        ctx,
+    );
+    vault::insert_position(
+        &mut v,
+        &oracle2,
+        false,
+        50 * constants::float_scaling!(),
+        3 * constants::float_scaling!(),
+        &clock,
+        ctx,
+    );
+
+    assert_eq!(vault::total_mtm(&v), 8 * constants::float_scaling!());
+    assert_eq!(vault::total_max_payout(&v), 8 * constants::float_scaling!());
+
+    vault::remove_position(
+        &mut v,
+        &oracle1,
+        true,
+        50 * constants::float_scaling!(),
+        5 * constants::float_scaling!(),
+        &clock,
+    );
+
+    assert_eq!(vault::total_mtm(&v), 3 * constants::float_scaling!());
+    assert_eq!(vault::total_max_payout(&v), 3 * constants::float_scaling!());
+
+    destroy(v);
+    destroy(oracle1);
+    destroy(oracle2);
+    destroy(clock);
+}
+
+#[test]
+/// Vault can dispense balance below max payout; the risk check is performed separately.
+fun dispense_payout_reduces_balance_below_max_payout() {
+    let ctx = &mut tx_context::dummy();
+    let (mut v, oracle, clock) = create_test_vault(200 * constants::float_scaling!(), ctx);
+
+    let payment = balance::create_for_testing<SUI>(100 * constants::float_scaling!());
+    vault::accept_payment(&mut v, payment);
+
+    vault::insert_position(
+        &mut v,
+        &oracle,
+        true,
+        50 * constants::float_scaling!(),
+        50 * constants::float_scaling!(),
+        &clock,
+        ctx,
+    );
+    assert_eq!(vault::total_max_payout(&v), 50 * constants::float_scaling!());
+
+    let payout = vault::dispense_payout(&mut v, 60 * constants::float_scaling!());
+    assert_eq!(vault::balance(&v), 40 * constants::float_scaling!());
+    assert_eq!(payout.value(), 60 * constants::float_scaling!());
+
+    destroy(payout);
+    destroy(v);
+    destroy(oracle);
+    destroy(clock);
+}
+
+#[test]
+/// After fully removing an oracle's exposure, reinserting should rebuild MTM and payout cleanly.
+fun reinsert_after_full_removal() {
+    let ctx = &mut tx_context::dummy();
+    let (mut v, oracle, clock) = create_test_vault(200 * constants::float_scaling!(), ctx);
+
+    vault::insert_position(
+        &mut v,
+        &oracle,
+        true,
+        50 * constants::float_scaling!(),
+        10 * constants::float_scaling!(),
+        &clock,
+        ctx,
+    );
+    assert_eq!(vault::total_mtm(&v), 10 * constants::float_scaling!());
+    vault::remove_position(
+        &mut v,
+        &oracle,
+        true,
+        50 * constants::float_scaling!(),
+        10 * constants::float_scaling!(),
+        &clock,
+    );
+    assert_eq!(vault::total_mtm(&v), 0);
+    assert_eq!(vault::total_max_payout(&v), 0);
+
+    vault::insert_position(
+        &mut v,
+        &oracle,
+        true,
+        50 * constants::float_scaling!(),
+        7 * constants::float_scaling!(),
+        &clock,
+        ctx,
+    );
+    assert_eq!(vault::total_mtm(&v), 7 * constants::float_scaling!());
+    assert_eq!(vault::total_max_payout(&v), 7 * constants::float_scaling!());
+
+    vault::insert_position(
+        &mut v,
+        &oracle,
+        true,
+        80 * constants::float_scaling!(),
+        3 * constants::float_scaling!(),
+        &clock,
+        ctx,
+    );
+    assert_eq!(vault::total_mtm(&v), 10 * constants::float_scaling!());
+    assert_eq!(vault::total_max_payout(&v), 10 * constants::float_scaling!());
+
+    destroy(v);
+    destroy(oracle);
+    destroy(clock);
+}
+
+#[test]
+/// Rebuilding exposure in the opposite direction after full removal should use fresh risk state.
+fun reinsert_different_direction_after_full_removal() {
+    let ctx = &mut tx_context::dummy();
+    let (mut v, oracle, clock) = create_test_vault(200 * constants::float_scaling!(), ctx);
+
+    vault::insert_position(
+        &mut v,
+        &oracle,
+        true,
+        50 * constants::float_scaling!(),
+        10 * constants::float_scaling!(),
+        &clock,
+        ctx,
+    );
+    vault::remove_position(
+        &mut v,
+        &oracle,
+        true,
+        50 * constants::float_scaling!(),
+        10 * constants::float_scaling!(),
+        &clock,
+    );
+
+    vault::insert_position(
+        &mut v,
+        &oracle,
+        false,
+        50 * constants::float_scaling!(),
+        5 * constants::float_scaling!(),
+        &clock,
+        ctx,
+    );
+    assert_eq!(vault::total_mtm(&v), 0);
+    assert_eq!(vault::total_max_payout(&v), 5 * constants::float_scaling!());
+
+    destroy(v);
+    destroy(oracle);
+    destroy(clock);
+}
+
+#[test]
+/// Live snapshot S0 ATM prices should flow through the vault curve into cached MTM.
+fun mtm_live_oracle_s0_atm() {
+    let ctx = &mut tx_context::dummy();
+    let mut v = vault::new<SUI>(ctx);
+    let (scenario, oracle, clock) = create_live_oracle_s0(ctx);
+    let s = &scenario;
+    let atm = &s.strike_points()[0];
+
+    vault::insert_position(&mut v, &oracle, true, atm.strike(), QTY, &clock, ctx);
+    precision::assert_approx(vault::total_mtm(&v), expected_mtm(atm, true));
+
+    vault::insert_position(&mut v, &oracle, false, atm.strike(), QTY, &clock, ctx);
+    let exp_total = expected_mtm(atm, true) + expected_mtm(atm, false);
+    precision::assert_approx(vault::total_mtm(&v), exp_total);
+
+    destroy(v);
+    destroy(oracle);
+    destroy(clock);
+}
+
+#[test]
+/// Live snapshot S0 OTM UP pricing should match generated oracle fixture data.
+fun mtm_live_oracle_s0_otm() {
+    let ctx = &mut tx_context::dummy();
+    let mut v = vault::new<SUI>(ctx);
+    let (scenario, oracle, clock) = create_live_oracle_s0(ctx);
+    let s = &scenario;
+    let otm10 = &s.strike_points()[2];
+
+    vault::insert_position(&mut v, &oracle, true, otm10.strike(), QTY, &clock, ctx);
+    precision::assert_approx(vault::total_mtm(&v), expected_mtm(otm10, true));
+
+    destroy(v);
+    destroy(oracle);
+    destroy(clock);
+}
+
+#[test]
+/// Near-expiry snapshot S4 should still evaluate to the generated live oracle price.
+fun mtm_live_oracle_s4_near_expiry() {
+    let ctx = &mut tx_context::dummy();
+    let mut v = vault::new<SUI>(ctx);
+    let (scenario, oracle, clock) = create_live_oracle_s4(ctx);
+    let s = &scenario;
+    let atm = &s.strike_points()[0];
+
+    vault::insert_position(&mut v, &oracle, true, atm.strike(), QTY, &clock, ctx);
+    precision::assert_approx(vault::total_mtm(&v), expected_mtm(atm, true));
+
+    destroy(v);
+    destroy(oracle);
+    destroy(clock);
+}
+
+#[test]
+/// Extreme near-expiry snapshot S5 should refresh correctly across remove/reinsert cycles.
+fun mtm_live_oracle_s5_extreme_near_expiry() {
+    let ctx = &mut tx_context::dummy();
+    let mut v = vault::new<SUI>(ctx);
+    let (scenario, oracle, clock) = create_live_oracle_s5(ctx);
+    let s = &scenario;
+    let atm = &s.strike_points()[0];
+    let itm10 = &s.strike_points()[4];
+
+    vault::insert_position(&mut v, &oracle, true, atm.strike(), QTY, &clock, ctx);
+    precision::assert_approx(vault::total_mtm(&v), expected_mtm(atm, true));
+
+    vault::remove_position(&mut v, &oracle, true, atm.strike(), QTY, &clock);
+    vault::insert_position(&mut v, &oracle, true, itm10.strike(), QTY, &clock, ctx);
+    precision::assert_approx(vault::total_mtm(&v), expected_mtm(itm10, true));
+
+    destroy(v);
+    destroy(oracle);
+    destroy(clock);
+}
+
+#[test]
+/// Live snapshot S0 OTM DOWN pricing should match generated oracle fixture data.
+fun mtm_live_oracle_s0_dn_otm10() {
+    let ctx = &mut tx_context::dummy();
+    let mut v = vault::new<SUI>(ctx);
+    let (scenario, oracle, clock) = create_live_oracle_s0(ctx);
+    let s = &scenario;
+    let otm10 = &s.strike_points()[2];
+
+    vault::insert_position(&mut v, &oracle, false, otm10.strike(), QTY, &clock, ctx);
+    precision::assert_approx(vault::total_mtm(&v), expected_mtm(otm10, false));
+
+    destroy(v);
+    destroy(oracle);
+    destroy(clock);
+}
+
+#[test]
+/// Live snapshot S5 ATM DOWN pricing should match generated oracle fixture data.
+fun mtm_live_oracle_s5_dn_atm() {
+    let ctx = &mut tx_context::dummy();
+    let mut v = vault::new<SUI>(ctx);
+    let (scenario, oracle, clock) = create_live_oracle_s5(ctx);
+    let s = &scenario;
+    let atm = &s.strike_points()[0];
+
+    vault::insert_position(&mut v, &oracle, false, atm.strike(), QTY, &clock, ctx);
+    precision::assert_approx(vault::total_mtm(&v), expected_mtm(atm, false));
+
+    destroy(v);
+    destroy(oracle);
+    destroy(clock);
 }
