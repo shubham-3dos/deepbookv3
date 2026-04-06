@@ -18,6 +18,7 @@ use sui::{balance::{Self, Balance}, coin::Coin, event};
 // === Errors ===
 const EPaused: u64 = 0;
 const EInsufficientBalance: u64 = 1;
+const EZeroAmount: u64 = 2;
 
 // === Events ===
 
@@ -63,9 +64,10 @@ public fun split_collateral<Quote>(
     payment: Coin<Quote>,
 ): u64 {
     assert!(!predict.paused, EPaused);
-    cap.assert_valid(object::id(predict), cap.oracle_id());
+    cap.assert_predict_valid(object::id(predict));
 
     let amount = payment.value();
+    assert!(amount > 0, EZeroAmount);
     predict.balance.join(payment.into_balance());
 
     event::emit(CollateralSplit {
@@ -83,7 +85,7 @@ public fun merge_collateral<Quote>(
     cap: &MarketCap,
     amount: u64,
 ): Balance<Quote> {
-    cap.assert_valid(object::id(predict), cap.oracle_id());
+    cap.assert_predict_valid(object::id(predict));
     assert!(predict.balance.value() >= amount, EInsufficientBalance);
 
     event::emit(CollateralMerged {

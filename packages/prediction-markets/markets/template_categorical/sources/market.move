@@ -5,16 +5,16 @@
 /// - Settle: oracle resolves → winning outcome redeems for $1, losers for $0
 module prediction_market_categorical::market;
 
-use prediction_markets::{
-    market_cap::MarketCap,
-    oracle_categorical::OracleCategorical,
-    predict::Predict
-};
 use prediction_market_categorical::{
     outcome_0::OUTCOME_0,
     outcome_1::OUTCOME_1,
     outcome_2::OUTCOME_2,
     outcome_3::OUTCOME_3
+};
+use prediction_markets::{
+    market_cap::MarketCap,
+    oracle_categorical::OracleCategorical,
+    predict::Predict
 };
 use sui::{coin::{Self, Coin, TreasuryCap}, event};
 
@@ -22,6 +22,7 @@ use sui::{coin::{Self, Coin, TreasuryCap}, event};
 const EAmountMismatch: u64 = 0;
 const EOracleNotResolved: u64 = 1;
 const EInvalidOracle: u64 = 2;
+const EOutcomeCountMismatch: u64 = 3;
 
 // === Events ===
 
@@ -66,6 +67,7 @@ public fun initialize(
     treasury_3: TreasuryCap<OUTCOME_3>,
     ctx: &mut TxContext,
 ) {
+    assert!(cap.num_outcomes() == 4, EOutcomeCountMismatch);
     transfer::share_object(MarketState {
         id: object::new(ctx),
         cap,

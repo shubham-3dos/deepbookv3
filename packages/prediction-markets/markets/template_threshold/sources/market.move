@@ -6,14 +6,15 @@
 /// - Trading: users trade Coin<YES>/Coin<NO> on DeepBook pools directly
 module prediction_market_threshold::market;
 
-use prediction_markets::{market_cap::MarketCap, oracle_price::OraclePrice, predict::Predict};
 use prediction_market_threshold::{no::NO, yes::YES};
+use prediction_markets::{market_cap::MarketCap, oracle_price::OraclePrice, predict::Predict};
 use sui::{coin::{Self, Coin, TreasuryCap}, event};
 
 // === Errors ===
 const EAmountMismatch: u64 = 0;
 const EOracleNotSettled: u64 = 1;
 const EInvalidOracle: u64 = 2;
+const EOutcomeCountMismatch: u64 = 3;
 
 // === Events ===
 
@@ -55,6 +56,7 @@ public fun initialize(
     no_treasury: TreasuryCap<NO>,
     ctx: &mut TxContext,
 ) {
+    assert!(cap.num_outcomes() == 2, EOutcomeCountMismatch);
     let state = MarketState { id: object::new(ctx), cap, yes_treasury, no_treasury };
     transfer::share_object(state);
 }
