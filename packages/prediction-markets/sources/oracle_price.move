@@ -20,6 +20,11 @@ const EFairPriceDeltaExceeded: u64 = 5;
 const EOraclePricesNotSet: u64 = 6;
 const EInvalidTouchConfirmations: u64 = 7;
 const EOverflow: u64 = 8;
+const EInvalidMaxFairPriceDelta: u64 = 9;
+
+// Max value admin may set for `touch_confirmations_required`. Beyond this,
+// a touch oracle becomes effectively unsettleable via touches.
+const MAX_TOUCH_CONFIRMATIONS: u64 = 100;
 
 /// Emitted when the oracle is activated for live pricing.
 public struct OraclePriceActivated has copy, drop, store {
@@ -219,8 +224,20 @@ public(package) fun create_oracle<Underlying>(
     max_fair_price_delta: u64,
     ctx: &mut TxContext,
 ): ID {
+    // max_fair_price_delta must be tighter than 100% — a delta of float_scaling
+    // or above silently disables the circuit breaker (any fair_price move is
+    // permitted). Reject at creation rather than letting a misconfigured
+    // oracle ship.
+    assert!(
+        max_fair_price_delta < constants::float_scaling!(),
+        EInvalidMaxFairPriceDelta,
+    );
     if (is_touch_market) {
-        assert!(touch_confirmations_required >= 1, EInvalidTouchConfirmations);
+        assert!(
+            touch_confirmations_required >= 1
+                && touch_confirmations_required <= MAX_TOUCH_CONFIRMATIONS,
+            EInvalidTouchConfirmations,
+        );
     };
     let oracle_uid = object::new(ctx);
     let oracle_id = oracle_uid.to_inner();

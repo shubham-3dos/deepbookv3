@@ -284,6 +284,15 @@ fun create_oracle_one_outcome() {
     abort
 }
 
+#[test, expected_failure(abort_code = oracle_categorical::EInvalidMaxFairPricesDelta)]
+fun create_oracle_delta_at_one_rejected() {
+    let ctx = &mut tx_context::dummy();
+    let cap = oracle_categorical::create_oracle_cap(ctx);
+    // max_fair_prices_delta == float_scaling silently disables the breaker.
+    oracle_categorical::create_oracle(&cap, 60_000, 4, 1_000_000_000, ctx);
+    abort
+}
+
 #[test, expected_failure(abort_code = oracle_categorical::EFairPricesDeltaExceeded)]
 fun update_prices_delta_exceeded() {
     let ctx = &mut tx_context::dummy();

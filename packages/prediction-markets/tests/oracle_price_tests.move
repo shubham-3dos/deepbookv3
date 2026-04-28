@@ -207,6 +207,24 @@ fun no_crash_on_update_after_settlement() {
 // Fair Price Delta Validation
 // =========================================================================
 
+#[test, expected_failure(abort_code = oracle_price::EInvalidMaxFairPriceDelta)]
+fun create_oracle_delta_at_one_rejected() {
+    let ctx = &mut tx_context::dummy();
+    let cap = oracle_price::create_oracle_cap(ctx);
+    // max_fair_price_delta == float_scaling silently disables the breaker.
+    oracle_price::create_oracle<BTC>(&cap, 60_000, 100_000, true, false, 0, 1_000_000_000, ctx);
+    abort
+}
+
+#[test, expected_failure(abort_code = oracle_price::EInvalidTouchConfirmations)]
+fun create_oracle_too_many_touch_confirmations() {
+    let ctx = &mut tx_context::dummy();
+    let cap = oracle_price::create_oracle_cap(ctx);
+    // 101 > MAX_TOUCH_CONFIRMATIONS (100).
+    oracle_price::create_oracle<BTC>(&cap, 60_000, 100_000, true, true, 101, 100_000_000, ctx);
+    abort
+}
+
 #[test, expected_failure(abort_code = oracle_price::EFairPriceDeltaExceeded)]
 fun fair_price_delta_exceeded() {
     let ctx = &mut tx_context::dummy();

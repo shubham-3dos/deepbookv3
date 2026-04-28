@@ -24,6 +24,7 @@ const EPricesSumInvalid: u64 = 8;
 const EOraclePricesNotSet: u64 = 9;
 const EOracleNotExpired: u64 = 10;
 const EFairPricesDeltaExceeded: u64 = 11;
+const EInvalidMaxFairPricesDelta: u64 = 12;
 
 /// Emitted when the oracle is activated for live pricing.
 public struct OracleCategoricalActivated has copy, drop, store {
@@ -208,6 +209,11 @@ public(package) fun create_oracle(
     ctx: &mut TxContext,
 ): ID {
     assert!(num_outcomes >= 2, EInvalidNumOutcomes);
+    // Reject values that would silently disable the L1 circuit breaker.
+    assert!(
+        max_fair_prices_delta < constants::float_scaling!(),
+        EInvalidMaxFairPricesDelta,
+    );
     let oracle_uid = object::new(ctx);
     let oracle_id = oracle_uid.to_inner();
     let mut fair_prices = vector[];
