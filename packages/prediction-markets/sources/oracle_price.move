@@ -228,10 +228,7 @@ public(package) fun create_oracle<Underlying>(
     // or above silently disables the circuit breaker (any fair_price move is
     // permitted). Reject at creation rather than letting a misconfigured
     // oracle ship.
-    assert!(
-        max_fair_price_delta < constants::float_scaling!(),
-        EInvalidMaxFairPriceDelta,
-    );
+    assert!(max_fair_price_delta < constants::float_scaling!(), EInvalidMaxFairPriceDelta);
     if (is_touch_market) {
         assert!(
             touch_confirmations_required >= 1

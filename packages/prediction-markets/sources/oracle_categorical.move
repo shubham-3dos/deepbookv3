@@ -210,10 +210,7 @@ public(package) fun create_oracle(
 ): ID {
     assert!(num_outcomes >= 2, EInvalidNumOutcomes);
     // Reject values that would silently disable the L1 circuit breaker.
-    assert!(
-        max_fair_prices_delta < constants::float_scaling!(),
-        EInvalidMaxFairPricesDelta,
-    );
+    assert!(max_fair_prices_delta < constants::float_scaling!(), EInvalidMaxFairPricesDelta);
     let oracle_uid = object::new(ctx);
     let oracle_id = oracle_uid.to_inner();
     let mut fair_prices = vector[];
