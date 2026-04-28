@@ -65,7 +65,7 @@ public fun split_collateral<Quote>(
     payment: Coin<Quote>,
 ): u64 {
     assert!(!predict.paused, EPaused);
-    cap.assert_predict_valid(object::id(predict));
+    cap.assert_predict_id(object::id(predict));
 
     let amount = payment.value();
     assert!(amount > 0, EZeroAmount);
@@ -86,7 +86,7 @@ public fun merge_collateral<Quote>(
     cap: &MarketCap,
     amount: u64,
 ): Balance<Quote> {
-    cap.assert_predict_valid(object::id(predict));
+    cap.assert_predict_id(object::id(predict));
     assert!(predict.balance.value() >= amount, EInsufficientBalance);
 
     event::emit(CollateralMerged {
@@ -107,7 +107,7 @@ public fun settle_collateral<Quote>(
     amount: u64,
     is_winner: bool,
 ): Balance<Quote> {
-    cap.assert_valid(object::id(predict), oracle_id);
+    cap.assert_predict_and_oracle_id(object::id(predict), oracle_id);
 
     event::emit(CollateralSettled {
         predict_id: object::id(predict),

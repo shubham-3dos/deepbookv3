@@ -77,13 +77,14 @@ public(package) fun new_categorical(
     }
 }
 
-/// Validate that this cap authorizes operations on the given predict pool.
-public(package) fun assert_predict_valid(cap: &MarketCap, predict_id: ID) {
+/// Abort unless this cap authorizes operations on the given Predict pool.
+public(package) fun assert_predict_id(cap: &MarketCap, predict_id: ID) {
     assert!(cap.predict_id == predict_id, EInvalidPredict);
 }
 
-/// Validate that this cap authorizes operations on the given predict pool and oracle.
-public(package) fun assert_valid(cap: &MarketCap, predict_id: ID, oracle_id: ID) {
+/// Abort unless this cap authorizes operations on the given Predict pool
+/// AND the given oracle. Used by settlement, which must verify both.
+public(package) fun assert_predict_and_oracle_id(cap: &MarketCap, predict_id: ID, oracle_id: ID) {
     assert!(cap.predict_id == predict_id, EInvalidPredict);
     assert!(cap.oracle_id == oracle_id, EInvalidOracle);
 }
