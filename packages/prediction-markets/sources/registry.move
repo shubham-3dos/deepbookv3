@@ -15,7 +15,6 @@ use sui::{coin::Coin, event};
 
 const EPredictAlreadyCreated: u64 = 0;
 
-// === Events ===
 public struct PredictCreated has copy, drop, store { predict_id: ID }
 public struct PriceOracleCreated has copy, drop, store {
     oracle_id: ID,
@@ -32,7 +31,6 @@ public struct CategoricalOracleCreated has copy, drop, store {
     num_outcomes: u8,
 }
 
-// === Structs ===
 public struct AdminCap has key, store { id: UID }
 public struct Registry has key { id: UID, predict_id: Option<ID> }
 
@@ -42,8 +40,6 @@ public struct Registry has key { id: UID, predict_id: Option<ID> }
 public fun predict_id(registry: &Registry): Option<ID> {
     registry.predict_id
 }
-
-// === Collateral Pool ===
 
 public fun create_predict<Quote>(
     registry: &mut Registry,
@@ -72,8 +68,6 @@ public fun set_paused<Quote>(
 ) {
     predict.set_paused(paused);
 }
-
-// === Price Oracle Management ===
 
 public fun create_oracle_cap_price(_admin_cap: &AdminCap, ctx: &mut TxContext): OracleCapPrice {
     oracle_price::create_oracle_cap(ctx)
@@ -111,8 +105,6 @@ public fun create_price_oracle<Underlying>(
     oracle_id
 }
 
-// === Categorical Oracle Management ===
-
 public fun create_oracle_cap_categorical(
     _admin_cap: &AdminCap,
     ctx: &mut TxContext,
@@ -147,8 +139,6 @@ public fun resolve_categorical_oracle(
     oracle_categorical::resolve(oracle, cap, winning_outcome, clock);
 }
 
-// === Market Registration ===
-
 public fun register_threshold_market<Quote>(
     _admin_cap: &AdminCap,
     predict: &predict::Predict<Quote>,
@@ -168,12 +158,14 @@ public fun register_categorical_market<Quote>(
     market_cap::new_categorical(object::id(predict), oracle_id, num_outcomes, ctx)
 }
 
-// === Init ===
+// === Private Functions ===
 
 fun init(ctx: &mut TxContext) {
     transfer::share_object(Registry { id: object::new(ctx), predict_id: option::none() });
     transfer::transfer(AdminCap { id: object::new(ctx) }, ctx.sender());
 }
+
+// === Test-Only Functions ===
 
 #[test_only]
 public fun init_for_testing(ctx: &mut TxContext) { init(ctx); }

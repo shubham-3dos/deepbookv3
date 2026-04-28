@@ -15,12 +15,9 @@ module prediction_markets::predict;
 use prediction_markets::market_cap::MarketCap;
 use sui::{balance::{Self, Balance}, coin::Coin, event};
 
-// === Errors ===
 const EPaused: u64 = 0;
 const EInsufficientBalance: u64 = 1;
 const EZeroAmount: u64 = 2;
-
-// === Events ===
 
 public struct CollateralSplit has copy, drop, store {
     predict_id: ID,
@@ -45,8 +42,6 @@ public struct PauseUpdated has copy, drop, store {
     predict_id: ID,
     paused: bool,
 }
-
-// === Structs ===
 
 /// Collateral pool for prediction markets.
 public struct Predict<phantom Quote> has key {
@@ -149,7 +144,7 @@ public(package) fun set_paused<Quote>(predict: &mut Predict<Quote>, paused: bool
     event::emit(PauseUpdated { predict_id: object::id(predict), paused });
 }
 
-// === Test Functions ===
+// === Test-Only Functions ===
 
 #[test_only]
 public(package) fun create_test_predict<Quote>(ctx: &mut TxContext): Predict<Quote> {

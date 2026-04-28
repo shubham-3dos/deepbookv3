@@ -11,7 +11,6 @@ module prediction_markets::oracle_price;
 use prediction_markets::constants;
 use sui::{clock::Clock, event};
 
-// === Errors ===
 const EInvalidOracleCap: u64 = 0;
 const EOracleStale: u64 = 1;
 const EOracleAlreadyActive: u64 = 2;
@@ -20,8 +19,6 @@ const EInvalidFairPrice: u64 = 4;
 const EFairPriceDeltaExceeded: u64 = 5;
 const EOraclePricesNotSet: u64 = 6;
 const EInvalidTouchConfirmations: u64 = 7;
-
-// === Events ===
 
 public struct OraclePriceActivated has copy, drop, store {
     oracle_id: ID,
@@ -47,8 +44,6 @@ public struct OraclePriceSettled has copy, drop, store {
     yes_wins: bool,
     timestamp: u64,
 }
-
-// === Structs ===
 
 /// Shared oracle for threshold prediction markets (YES/NO).
 /// One oracle per market, parameterized by phantom Underlying asset type.
@@ -231,6 +226,8 @@ public(package) fun assert_not_stale<Underlying>(oracle: &OraclePrice<Underlying
     assert!(!is_stale(oracle, clock), EOracleStale);
 }
 
+// === Private Functions ===
+
 /// Touch market: settle YES if threshold crossed enough times, NO if expiry passes.
 fun try_settle_touch<Underlying>(oracle: &mut OraclePrice<Underlying>, spot: u64, now: u64) {
     let threshold_crossed = if (oracle.threshold_above) {
@@ -288,7 +285,7 @@ fun assert_authorized_cap<Underlying>(oracle: &OraclePrice<Underlying>, cap: &Or
     assert!(oracle.oracle_cap_id == cap.id.to_inner(), EInvalidOracleCap);
 }
 
-// === Test Functions ===
+// === Test-Only Functions ===
 
 #[test_only]
 public(package) fun create_test_oracle<Underlying>(

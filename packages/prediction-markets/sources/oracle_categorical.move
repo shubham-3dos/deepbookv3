@@ -19,8 +19,6 @@ const EPricesSumInvalid: u64 = 8;
 const EOraclePricesNotSet: u64 = 9;
 const EOracleNotExpired: u64 = 10;
 
-// === Events ===
-
 public struct OracleCategoricalActivated has copy, drop, store {
     oracle_id: ID,
     num_outcomes: u8,
@@ -39,8 +37,6 @@ public struct OracleCategoricalResolved has copy, drop, store {
     winning_outcome: u8,
     timestamp: u64,
 }
-
-// === Structs ===
 
 /// Shared oracle for categorical prediction markets (2+ outcomes).
 public struct OracleCategorical has key {
@@ -186,11 +182,13 @@ public(package) fun assert_not_stale(oracle: &OracleCategorical, clock: &Clock) 
     assert!(!is_stale(oracle, clock), EOracleStale);
 }
 
+// === Private Functions ===
+
 fun assert_authorized_cap(oracle: &OracleCategorical, cap: &OracleCapCategorical) {
     assert!(oracle.oracle_cap_id == cap.id.to_inner(), EInvalidOracleCap);
 }
 
-// === Test Functions ===
+// === Test-Only Functions ===
 
 #[test_only]
 public(package) fun create_test_oracle(

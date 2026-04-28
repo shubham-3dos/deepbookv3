@@ -18,13 +18,10 @@ use prediction_markets::{
 };
 use sui::{coin::{Self, Coin, TreasuryCap}, event};
 
-// === Errors ===
 const EAmountMismatch: u64 = 0;
 const EOracleNotResolved: u64 = 1;
 const EInvalidOracle: u64 = 2;
 const EOutcomeCountMismatch: u64 = 3;
-
-// === Events ===
 
 public struct PositionSplit has copy, drop, store {
     market_id: ID,
@@ -45,8 +42,6 @@ public struct PositionSettled has copy, drop, store {
     amount: u64,
     payout: u64,
 }
-
-// === Structs ===
 
 public struct MarketState has key {
     id: UID,

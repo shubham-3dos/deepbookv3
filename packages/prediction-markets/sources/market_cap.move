@@ -18,6 +18,8 @@ public struct MarketCap has key, store {
     num_outcomes: u8,
 }
 
+// === Public Functions ===
+
 public fun predict_id(cap: &MarketCap): ID { cap.predict_id }
 
 public fun oracle_id(cap: &MarketCap): ID { cap.oracle_id }
@@ -29,6 +31,8 @@ public fun num_outcomes(cap: &MarketCap): u8 { cap.num_outcomes }
 public fun is_threshold(cap: &MarketCap): bool { cap.market_type == MARKET_TYPE_THRESHOLD }
 
 public fun is_categorical(cap: &MarketCap): bool { cap.market_type == MARKET_TYPE_CATEGORICAL }
+
+// === Public-Package Functions ===
 
 public(package) fun new_threshold(predict_id: ID, oracle_id: ID, ctx: &mut TxContext): MarketCap {
     MarketCap {
@@ -65,6 +69,8 @@ public(package) fun assert_valid(cap: &MarketCap, predict_id: ID, oracle_id: ID)
     assert!(cap.predict_id == predict_id, EInvalidPredict);
     assert!(cap.oracle_id == oracle_id, EInvalidOracle);
 }
+
+// === Test-Only Functions ===
 
 #[test_only]
 public fun create_test_market_cap_threshold(
