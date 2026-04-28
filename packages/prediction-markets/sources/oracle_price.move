@@ -27,7 +27,7 @@ public struct OraclePriceActivated has copy, drop, store {
     threshold: u64,
     threshold_above: bool,
     is_touch_market: bool,
-    timestamp: u64,
+    timestamp_ms: u64,
 }
 
 /// Emitted on every successful operator price update prior to settlement.
@@ -36,7 +36,7 @@ public struct OraclePriceUpdated has copy, drop, store {
     spot: u64,
     fair_price: u64,
     touch_count: u64,
-    timestamp: u64,
+    timestamp_ms: u64,
 }
 
 /// Emitted exactly once, when settlement state freezes.
@@ -47,7 +47,7 @@ public struct OraclePriceSettled has copy, drop, store {
     expiry: u64,
     settlement_price: u64,
     yes_wins: bool,
-    timestamp: u64,
+    timestamp_ms: u64,
 }
 
 /// Shared oracle for threshold prediction markets (YES/NO).
@@ -56,7 +56,7 @@ public struct OraclePrice<phantom Underlying> has key {
     id: UID,
     /// ID of the OracleCapPrice authorized to update this oracle
     oracle_cap_id: ID,
-    /// Expiration timestamp in milliseconds
+    /// Expiration time in milliseconds
     expiry: u64,
     /// Whether the oracle has been activated for trading
     active: bool,
@@ -65,7 +65,7 @@ public struct OraclePrice<phantom Underlying> has key {
     /// Fair probability of YES outcome (scaled by FLOAT_SCALING)
     fair_price: u64,
     /// Timestamp of last update in milliseconds
-    timestamp: u64,
+    timestamp_ms: u64,
     /// Settlement price, frozen on resolution
     settlement_price: Option<u64>,
     /// Price threshold for YES/NO determination
@@ -77,7 +77,7 @@ public struct OraclePrice<phantom Underlying> has key {
     /// How many threshold crosses required for touch settlement
     touch_confirmations_required: u64,
     /// Timestamp of last touch crossing (debounce timer)
-    last_touch_timestamp: u64,
+    last_touch_timestamp_ms: u64,
     /// Maximum allowed fair_price change per update
     max_fair_price_delta: u64,
     /// Settlement mode: true = touch, false = at-expiry
@@ -94,7 +94,7 @@ public struct OracleCapPrice has key, store {
 // === Public Functions ===
 
 /// Operator-only: flip the oracle to active. Requires that prices have
-/// been seeded (timestamp > 0) and that current time is before expiry.
+/// been seeded (timestamp_ms > 0) and that current time is before expiry.
 public fun activate<Underlying>(
     oracle: &mut OraclePrice<Underlying>,
     cap: &OracleCapPrice,
@@ -103,7 +103,7 @@ public fun activate<Underlying>(
     assert_authorized_cap(oracle, cap);
     assert!(!oracle.active, EOracleAlreadyActive);
     assert!(clock.timestamp_ms() < oracle.expiry, EOracleExpired);
-    assert!(oracle.timestamp > 0, EOraclePricesNotSet);
+    assert!(oracle.timestamp_ms > 0, EOraclePricesNotSet);
     oracle.active = true;
     event::emit(OraclePriceActivated {
         oracle_id: oracle.id.to_inner(),
@@ -111,13 +111,13 @@ public fun activate<Underlying>(
         threshold: oracle.threshold,
         threshold_above: oracle.threshold_above,
         is_touch_market: oracle.is_touch_market,
-        timestamp: clock.timestamp_ms(),
+        timestamp_ms: clock.timestamp_ms(),
     });
 }
 
 /// Operator-only: refresh spot and fair_price. While the oracle is active,
 /// each update may trigger settlement (at-expiry or touch). After settlement
-/// the function still accepts updates but only bumps `timestamp` and
+/// the function still accepts updates but only bumps `timestamp_ms` and
 /// returns without emitting an update event.
 public fun update_price<Underlying>(
     oracle: &mut OraclePrice<Underlying>,
@@ -131,7 +131,7 @@ public fun update_price<Underlying>(
     let now = clock.timestamp_ms();
 
     // Validate fair price delta against previous update
-    if (oracle.timestamp > 0 && oracle.settlement_price.is_none()) {
+    if (oracle.timestamp_ms > 0 && oracle.settlement_price.is_none()) {
         let delta = if (fair_price > oracle.fair_price) {
             fair_price - oracle.fair_price
         } else {
@@ -149,23 +149,23 @@ public fun update_price<Underlying>(
         };
     };
 
-    // After settlement, only update timestamp and return (no update event)
+    // After settlement, only update timestamp_ms and return (no update event)
     if (oracle.settlement_price.is_some()) {
-        oracle.timestamp = now;
+        oracle.timestamp_ms = now;
         return
     };
 
     // Update live prices
     oracle.spot = spot;
     oracle.fair_price = fair_price;
-    oracle.timestamp = now;
+    oracle.timestamp_ms = now;
 
     event::emit(OraclePriceUpdated {
         oracle_id: oracle.id.to_inner(),
         spot,
         fair_price,
         touch_count: oracle.touch_count,
-        timestamp: now,
+        timestamp_ms: now,
     });
 }
 
@@ -197,7 +197,7 @@ public fun spot<Underlying>(oracle: &OraclePrice<Underlying>): u64 { oracle.spot
 
 /// True if the last operator update is older than `staleness_threshold_ms`.
 public fun is_stale<Underlying>(oracle: &OraclePrice<Underlying>, clock: &Clock): bool {
-    clock.timestamp_ms() > oracle.timestamp + constants::staleness_threshold_ms!()
+    clock.timestamp_ms() > oracle.timestamp_ms + constants::staleness_threshold_ms!()
 }
 
 // === Public-Package Functions ===
@@ -230,13 +230,13 @@ public(package) fun create_oracle<Underlying>(
         active: false,
         spot: 0,
         fair_price: 0,
-        timestamp: 0,
+        timestamp_ms: 0,
         settlement_price: option::none(),
         threshold,
         threshold_above,
         touch_count: 0,
         touch_confirmations_required,
-        last_touch_timestamp: 0,
+        last_touch_timestamp_ms: 0,
         max_fair_price_delta,
         is_touch_market,
         yes_wins: false,
@@ -260,10 +260,10 @@ fun try_settle_touch<Underlying>(oracle: &mut OraclePrice<Underlying>, spot: u64
     };
 
     if (
-        threshold_crossed && now >= oracle.last_touch_timestamp + constants::min_touch_interval_ms!()
+        threshold_crossed && now >= oracle.last_touch_timestamp_ms + constants::min_touch_interval_ms!()
     ) {
         oracle.touch_count = oracle.touch_count + 1;
-        oracle.last_touch_timestamp = now;
+        oracle.last_touch_timestamp_ms = now;
         if (oracle.touch_count >= oracle.touch_confirmations_required) {
             settle(oracle, spot, true, now);
             return
@@ -300,7 +300,7 @@ fun settle<Underlying>(oracle: &mut OraclePrice<Underlying>, spot: u64, yes_wins
         expiry: oracle.expiry,
         settlement_price: spot,
         yes_wins,
-        timestamp: now,
+        timestamp_ms: now,
     });
 }
 
@@ -320,7 +320,7 @@ public(package) fun create_test_oracle<Underlying>(
     max_fair_price_delta: u64,
     fair_price: u64,
     spot: u64,
-    timestamp: u64,
+    timestamp_ms: u64,
     ctx: &mut TxContext,
 ): OraclePrice<Underlying> {
     OraclePrice<Underlying> {
@@ -330,13 +330,13 @@ public(package) fun create_test_oracle<Underlying>(
         active: true,
         spot,
         fair_price,
-        timestamp,
+        timestamp_ms,
         settlement_price: option::none(),
         threshold,
         threshold_above,
         touch_count: 0,
         touch_confirmations_required,
-        last_touch_timestamp: 0,
+        last_touch_timestamp_ms: 0,
         max_fair_price_delta,
         is_touch_market,
         yes_wins: false,
@@ -354,7 +354,7 @@ public(package) fun create_test_oracle_with_cap<Underlying>(
     max_fair_price_delta: u64,
     fair_price: u64,
     spot: u64,
-    timestamp: u64,
+    timestamp_ms: u64,
     ctx: &mut TxContext,
 ): (OraclePrice<Underlying>, OracleCapPrice) {
     let cap = OracleCapPrice { id: object::new(ctx) };
@@ -365,13 +365,13 @@ public(package) fun create_test_oracle_with_cap<Underlying>(
         active: true,
         spot,
         fair_price,
-        timestamp,
+        timestamp_ms,
         settlement_price: option::none(),
         threshold,
         threshold_above,
         touch_count: 0,
         touch_confirmations_required,
-        last_touch_timestamp: 0,
+        last_touch_timestamp_ms: 0,
         max_fair_price_delta,
         is_touch_market,
         yes_wins: false,

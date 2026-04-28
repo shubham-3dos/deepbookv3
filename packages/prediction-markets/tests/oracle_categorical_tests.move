@@ -22,7 +22,7 @@ fun four_outcome_oracle(
         expiry,
         4,
         vector[250_000_000, 250_000_000, 250_000_000, 250_000_000], // 25% each
-        1000, // timestamp
+        1000, // timestamp_ms
         ctx,
     )
 }

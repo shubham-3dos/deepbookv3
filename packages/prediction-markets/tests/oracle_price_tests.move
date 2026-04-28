@@ -31,7 +31,7 @@ fun at_expiry_oracle(
         100_000_000, // max delta = 10%
         500_000_000, // fair = 50%
         100_000, // spot
-        1000, // timestamp 1s
+        1000, // timestamp_ms 1s
         ctx,
     )
 }
@@ -65,7 +65,7 @@ fun not_stale_within_30s() {
     let ctx = &mut tx_context::dummy();
     let (oracle, cap) = at_expiry_oracle(60_000, 100_000, true, ctx);
     let mut clock = clock::create_for_testing(ctx);
-    clock.set_for_testing(31_000); // 30s since timestamp=1000
+    clock.set_for_testing(31_000); // 30s since timestamp_ms=1000
     assert!(!oracle.is_stale(&clock));
     clock.destroy_for_testing();
     destroy(oracle);

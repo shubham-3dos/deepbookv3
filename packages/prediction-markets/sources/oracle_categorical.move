@@ -29,21 +29,21 @@ public struct OracleCategoricalActivated has copy, drop, store {
     oracle_id: ID,
     num_outcomes: u8,
     expiry: u64,
-    timestamp: u64,
+    timestamp_ms: u64,
 }
 
 /// Emitted on every successful operator price update prior to resolution.
 public struct OracleCategoricalUpdated has copy, drop, store {
     oracle_id: ID,
     fair_prices: vector<u64>,
-    timestamp: u64,
+    timestamp_ms: u64,
 }
 
 /// Emitted exactly once, when the admin resolves to a winning outcome.
 public struct OracleCategoricalResolved has copy, drop, store {
     oracle_id: ID,
     winning_outcome: u8,
-    timestamp: u64,
+    timestamp_ms: u64,
 }
 
 /// Shared oracle for categorical prediction markets (2+ outcomes).
@@ -51,7 +51,7 @@ public struct OracleCategorical has key {
     id: UID,
     /// ID of the OracleCapCategorical authorized to update this oracle
     oracle_cap_id: ID,
-    /// Expiration timestamp in milliseconds
+    /// Expiration time in milliseconds
     expiry: u64,
     /// Whether the oracle has been activated
     active: bool,
@@ -60,7 +60,7 @@ public struct OracleCategorical has key {
     /// Implied probability for each outcome (scaled by FLOAT_SCALING, sum ~= 1.0)
     fair_prices: vector<u64>,
     /// Timestamp of last update in milliseconds
-    timestamp: u64,
+    timestamp_ms: u64,
     /// Winning outcome index (0-indexed), set on resolution
     winning_outcome: Option<u8>,
 }
@@ -73,18 +73,18 @@ public struct OracleCapCategorical has key, store {
 // === Public Functions ===
 
 /// Operator-only: flip the oracle to active. Requires that prices have
-/// been seeded (timestamp > 0) and that current time is before expiry.
+/// been seeded (timestamp_ms > 0) and that current time is before expiry.
 public fun activate(oracle: &mut OracleCategorical, cap: &OracleCapCategorical, clock: &Clock) {
     assert_authorized_cap(oracle, cap);
     assert!(!oracle.active, EOracleAlreadyActive);
     assert!(clock.timestamp_ms() < oracle.expiry, EOracleExpired);
-    assert!(oracle.timestamp > 0, EOraclePricesNotSet);
+    assert!(oracle.timestamp_ms > 0, EOraclePricesNotSet);
     oracle.active = true;
     event::emit(OracleCategoricalActivated {
         oracle_id: oracle.id.to_inner(),
         num_outcomes: oracle.num_outcomes,
         expiry: oracle.expiry,
-        timestamp: clock.timestamp_ms(),
+        timestamp_ms: clock.timestamp_ms(),
     });
 }
 
@@ -110,11 +110,11 @@ public fun update_prices(
     );
 
     oracle.fair_prices = fair_prices;
-    oracle.timestamp = clock.timestamp_ms();
+    oracle.timestamp_ms = clock.timestamp_ms();
     event::emit(OracleCategoricalUpdated {
         oracle_id: oracle.id.to_inner(),
         fair_prices: oracle.fair_prices,
-        timestamp: oracle.timestamp,
+        timestamp_ms: oracle.timestamp_ms,
     });
 }
 
@@ -135,7 +135,7 @@ public fun resolve(
     event::emit(OracleCategoricalResolved {
         oracle_id: oracle.id.to_inner(),
         winning_outcome,
-        timestamp: clock.timestamp_ms(),
+        timestamp_ms: clock.timestamp_ms(),
     });
 }
 
@@ -167,7 +167,7 @@ public fun is_active(oracle: &OracleCategorical): bool { oracle.active }
 
 /// True if the last operator update is older than `staleness_threshold_ms`.
 public fun is_stale(oracle: &OracleCategorical, clock: &Clock): bool {
-    clock.timestamp_ms() > oracle.timestamp + constants::staleness_threshold_ms!()
+    clock.timestamp_ms() > oracle.timestamp_ms + constants::staleness_threshold_ms!()
 }
 
 // === Public-Package Functions ===
@@ -197,7 +197,7 @@ public(package) fun create_oracle(
         active: false,
         num_outcomes,
         fair_prices,
-        timestamp: 0,
+        timestamp_ms: 0,
         winning_outcome: option::none(),
     });
     oracle_id
@@ -221,7 +221,7 @@ public(package) fun create_test_oracle(
     expiry: u64,
     num_outcomes: u8,
     fair_prices: vector<u64>,
-    timestamp: u64,
+    timestamp_ms: u64,
     ctx: &mut TxContext,
 ): OracleCategorical {
     OracleCategorical {
@@ -231,7 +231,7 @@ public(package) fun create_test_oracle(
         active: true,
         num_outcomes,
         fair_prices,
-        timestamp,
+        timestamp_ms,
         winning_outcome: option::none(),
     }
 }
@@ -242,7 +242,7 @@ public(package) fun create_test_oracle_with_cap(
     expiry: u64,
     num_outcomes: u8,
     fair_prices: vector<u64>,
-    timestamp: u64,
+    timestamp_ms: u64,
     ctx: &mut TxContext,
 ): (OracleCategorical, OracleCapCategorical) {
     let cap = OracleCapCategorical { id: object::new(ctx) };
@@ -253,7 +253,7 @@ public(package) fun create_test_oracle_with_cap(
         active: true,
         num_outcomes,
         fair_prices,
-        timestamp,
+        timestamp_ms,
         winning_outcome: option::none(),
     };
     (oracle, cap)
