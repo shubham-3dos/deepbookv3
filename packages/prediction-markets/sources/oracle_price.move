@@ -19,6 +19,7 @@ const EInvalidFairPrice: u64 = 4;
 const EFairPriceDeltaExceeded: u64 = 5;
 const EOraclePricesNotSet: u64 = 6;
 const EInvalidTouchConfirmations: u64 = 7;
+const EOverflow: u64 = 8;
 
 /// Emitted when the oracle is activated for live pricing.
 public struct OraclePriceActivated has copy, drop, store {
@@ -259,16 +260,19 @@ fun try_settle_touch<Underlying>(oracle: &mut OraclePrice<Underlying>, spot: u64
         spot <= oracle.threshold
     };
 
-    if (
-        threshold_crossed && now >= oracle.last_touch_timestamp_ms + constants::min_touch_interval_ms!()
-    ) {
-        oracle.touch_count = oracle.touch_count + 1;
-        oracle.last_touch_timestamp_ms = now;
-        if (oracle.touch_count >= oracle.touch_confirmations_required) {
-            settle(oracle, spot, true, now);
-            return
+    if (threshold_crossed) {
+        let interval = constants::min_touch_interval_ms!();
+        assert!(oracle.last_touch_timestamp_ms <= std::u64::max_value!() - interval, EOverflow);
+        if (now >= oracle.last_touch_timestamp_ms + interval) {
+            assert!(oracle.touch_count < std::u64::max_value!(), EOverflow);
+            oracle.touch_count = oracle.touch_count + 1;
+            oracle.last_touch_timestamp_ms = now;
+            if (oracle.touch_count >= oracle.touch_confirmations_required) {
+                settle(oracle, spot, true, now);
+                return
+            };
         };
-    } else if (!threshold_crossed) {
+    } else {
         oracle.touch_count = 0;
     };
 
