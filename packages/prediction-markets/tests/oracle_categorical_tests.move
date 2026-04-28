@@ -23,6 +23,7 @@ fun four_outcome_oracle(
         4,
         vector[250_000_000, 250_000_000, 250_000_000, 250_000_000], // 25% each
         1000, // timestamp_ms
+        500_000_000, // max_fair_prices_delta = 50% L1
         ctx,
     )
 }
@@ -271,7 +272,7 @@ fun wrong_cap_rejected() {
 fun create_oracle_zero_outcomes() {
     let ctx = &mut tx_context::dummy();
     let cap = oracle_categorical::create_oracle_cap(ctx);
-    oracle_categorical::create_oracle(&cap, 60_000, 0, ctx);
+    oracle_categorical::create_oracle(&cap, 60_000, 0, 500_000_000, ctx);
     abort
 }
 
@@ -279,6 +280,42 @@ fun create_oracle_zero_outcomes() {
 fun create_oracle_one_outcome() {
     let ctx = &mut tx_context::dummy();
     let cap = oracle_categorical::create_oracle_cap(ctx);
-    oracle_categorical::create_oracle(&cap, 60_000, 1, ctx);
+    oracle_categorical::create_oracle(&cap, 60_000, 1, 500_000_000, ctx);
     abort
+}
+
+#[test, expected_failure(abort_code = oracle_categorical::EFairPricesDeltaExceeded)]
+fun update_prices_delta_exceeded() {
+    let ctx = &mut tx_context::dummy();
+    // Tight delta: 10% L1 only
+    let (mut oracle, cap) = oracle_categorical::create_test_oracle_with_cap(
+        60_000,
+        4,
+        vector[250_000_000, 250_000_000, 250_000_000, 250_000_000],
+        1000,
+        100_000_000, // 10% L1 cap
+        ctx,
+    );
+    let mut clock = clock::create_for_testing(ctx);
+    clock.set_for_testing(5_000);
+
+    // L1 distance = 150M+50M+50M+150M = 400M (40%) > 10% cap
+    oracle.update_prices(&cap, vector[400_000_000, 300_000_000, 200_000_000, 100_000_000], &clock);
+    abort
+}
+
+#[test]
+fun update_prices_delta_within_limit() {
+    let ctx = &mut tx_context::dummy();
+    let (mut oracle, cap) = four_outcome_oracle(60_000, ctx);
+    let mut clock = clock::create_for_testing(ctx);
+    clock.set_for_testing(5_000);
+
+    // L1 distance = 50M+50M+50M+50M = 200M (20%) < 50% cap
+    oracle.update_prices(&cap, vector[200_000_000, 200_000_000, 300_000_000, 300_000_000], &clock);
+    assert!(oracle.fair_price(0) == 200_000_000);
+
+    clock.destroy_for_testing();
+    destroy(oracle);
+    destroy(cap);
 }

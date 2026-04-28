@@ -136,9 +136,16 @@ public fun create_categorical_oracle(
     cap: &OracleCapCategorical,
     expiry: u64,
     num_outcomes: u8,
+    max_fair_prices_delta: u64,
     ctx: &mut TxContext,
 ): ID {
-    let oracle_id = oracle_categorical::create_oracle(cap, expiry, num_outcomes, ctx);
+    let oracle_id = oracle_categorical::create_oracle(
+        cap,
+        expiry,
+        num_outcomes,
+        max_fair_prices_delta,
+        ctx,
+    );
     event::emit(CategoricalOracleCreated {
         oracle_id,
         oracle_cap_id: object::id(cap),

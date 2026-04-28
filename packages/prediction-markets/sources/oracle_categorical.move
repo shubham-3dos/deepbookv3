@@ -23,6 +23,7 @@ const EInvalidFairPrices: u64 = 7;
 const EPricesSumInvalid: u64 = 8;
 const EOraclePricesNotSet: u64 = 9;
 const EOracleNotExpired: u64 = 10;
+const EFairPricesDeltaExceeded: u64 = 11;
 
 /// Emitted when the oracle is activated for live pricing.
 public struct OracleCategoricalActivated has copy, drop, store {
@@ -61,6 +62,9 @@ public struct OracleCategorical has key {
     fair_prices: vector<u64>,
     /// Timestamp of last update in milliseconds
     timestamp_ms: u64,
+    /// Maximum allowed L1 distance between consecutive fair_prices vectors,
+    /// in scaled units. Caps how far prices can move between updates.
+    max_fair_prices_delta: u64,
     /// Winning outcome index (0-indexed), set on resolution
     winning_outcome: Option<u8>,
 }
@@ -89,7 +93,9 @@ public fun activate(oracle: &mut OracleCategorical, cap: &OracleCapCategorical, 
 }
 
 /// Operator-only: refresh the implied-probability vector. Asserts the new
-/// vector has the right length and sums to ~1.0 within tolerance.
+/// vector has the right length, sums to ~1.0 within tolerance, and (after
+/// the first update) moves no more than `max_fair_prices_delta` in L1
+/// distance from the previous vector.
 public fun update_prices(
     oracle: &mut OracleCategorical,
     cap: &OracleCapCategorical,
@@ -108,6 +114,22 @@ public fun update_prices(
             && sum <= constants::float_scaling!() + constants::fair_price_sum_tolerance!(),
         EPricesSumInvalid,
     );
+
+    // Rate-of-change circuit breaker: skip on the seeding update (when
+    // timestamp_ms == 0 the existing vector is the all-zeros initialization).
+    if (oracle.timestamp_ms > 0) {
+        let n = (oracle.num_outcomes as u64);
+        let mut l1 = 0u64;
+        let mut i = 0u64;
+        while (i < n) {
+            let old = oracle.fair_prices[i];
+            let new = fair_prices[i];
+            let diff = if (new > old) new - old else old - new;
+            l1 = l1 + diff;
+            i = i + 1;
+        };
+        assert!(l1 <= oracle.max_fair_prices_delta, EFairPricesDeltaExceeded);
+    };
 
     oracle.fair_prices = fair_prices;
     oracle.timestamp_ms = clock.timestamp_ms();
@@ -182,6 +204,7 @@ public(package) fun create_oracle(
     cap: &OracleCapCategorical,
     expiry: u64,
     num_outcomes: u8,
+    max_fair_prices_delta: u64,
     ctx: &mut TxContext,
 ): ID {
     assert!(num_outcomes >= 2, EInvalidNumOutcomes);
@@ -198,6 +221,7 @@ public(package) fun create_oracle(
         num_outcomes,
         fair_prices,
         timestamp_ms: 0,
+        max_fair_prices_delta,
         winning_outcome: option::none(),
     });
     oracle_id
@@ -222,6 +246,7 @@ public(package) fun create_test_oracle(
     num_outcomes: u8,
     fair_prices: vector<u64>,
     timestamp_ms: u64,
+    max_fair_prices_delta: u64,
     ctx: &mut TxContext,
 ): OracleCategorical {
     OracleCategorical {
@@ -232,6 +257,7 @@ public(package) fun create_test_oracle(
         num_outcomes,
         fair_prices,
         timestamp_ms,
+        max_fair_prices_delta,
         winning_outcome: option::none(),
     }
 }
@@ -243,6 +269,7 @@ public(package) fun create_test_oracle_with_cap(
     num_outcomes: u8,
     fair_prices: vector<u64>,
     timestamp_ms: u64,
+    max_fair_prices_delta: u64,
     ctx: &mut TxContext,
 ): (OracleCategorical, OracleCapCategorical) {
     let cap = OracleCapCategorical { id: object::new(ctx) };
@@ -254,6 +281,7 @@ public(package) fun create_test_oracle_with_cap(
         num_outcomes,
         fair_prices,
         timestamp_ms,
+        max_fair_prices_delta,
         winning_outcome: option::none(),
     };
     (oracle, cap)
