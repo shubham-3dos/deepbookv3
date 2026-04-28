@@ -15,18 +15,21 @@ const EOracleNotSettled: u64 = 1;
 const EInvalidOracle: u64 = 2;
 const EOutcomeCountMismatch: u64 = 3;
 
+/// Emitted when a trader splits collateral into a YES + NO pair.
 public struct PositionSplit has copy, drop, store {
     market_id: ID,
     trader: address,
     amount: u64,
 }
 
+/// Emitted when a trader merges a YES + NO pair back into collateral.
 public struct PositionMerged has copy, drop, store {
     market_id: ID,
     trader: address,
     amount: u64,
 }
 
+/// Emitted when a trader settles a YES or NO position after the oracle resolves.
 public struct PositionSettled has copy, drop, store {
     market_id: ID,
     trader: address,
@@ -35,6 +38,8 @@ public struct PositionSettled has copy, drop, store {
     payout: u64,
 }
 
+/// Shared per-market state: the authorization cap and the two treasury
+/// caps that gate YES/NO supply. The treasury caps never leave this object.
 public struct MarketState has key {
     id: UID,
     cap: MarketCap,

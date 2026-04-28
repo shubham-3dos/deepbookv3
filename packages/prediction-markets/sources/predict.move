@@ -19,18 +19,23 @@ const EPaused: u64 = 0;
 const EInsufficientBalance: u64 = 1;
 const EZeroAmount: u64 = 2;
 
+/// Emitted when collateral is split into a paired set of outcome tokens.
 public struct CollateralSplit has copy, drop, store {
     predict_id: ID,
     oracle_id: ID,
     amount: u64,
 }
 
+/// Emitted when a paired set of outcome tokens is merged back into collateral.
 public struct CollateralMerged has copy, drop, store {
     predict_id: ID,
     oracle_id: ID,
     amount: u64,
 }
 
+/// Emitted when an outcome position is settled. `is_winner` distinguishes the
+/// winning-outcome payout (1:1 against collateral) from the losing-outcome
+/// no-op (zero balance returned).
 public struct CollateralSettled has copy, drop, store {
     predict_id: ID,
     oracle_id: ID,
@@ -38,6 +43,7 @@ public struct CollateralSettled has copy, drop, store {
     is_winner: bool,
 }
 
+/// Emitted whenever the pool's pause flag changes.
 public struct PauseUpdated has copy, drop, store {
     predict_id: ID,
     paused: bool,
@@ -118,12 +124,14 @@ public fun settle_collateral<Quote>(
     }
 }
 
+/// Total collateral currently held by the pool.
 public fun balance<Quote>(predict: &Predict<Quote>): u64 {
     predict.balance.value()
 }
 
 // === Public-Package Functions ===
 
+/// Create and share a new collateral pool. Returns the new Predict pool's ID.
 public(package) fun create<Quote>(ctx: &mut TxContext): ID {
     let predict = Predict<Quote> {
         id: object::new(ctx),
@@ -135,10 +143,14 @@ public(package) fun create<Quote>(ctx: &mut TxContext): ID {
     predict_id
 }
 
+/// Admin-only deposit: add collateral without minting outcome tokens.
+/// Intended for subsidy/seeding; does not mint YES/NO/outcome positions.
 public(package) fun deposit<Quote>(predict: &mut Predict<Quote>, coin: Coin<Quote>) {
     predict.balance.join(coin.into_balance());
 }
 
+/// Admin-only flip of the `paused` flag. Pausing blocks new splits but does
+/// not block merge or settle (those reduce risk; pause only blocks new risk).
 public(package) fun set_paused<Quote>(predict: &mut Predict<Quote>, paused: bool) {
     predict.paused = paused;
     event::emit(PauseUpdated { predict_id: object::id(predict), paused });

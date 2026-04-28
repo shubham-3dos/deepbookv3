@@ -20,6 +20,7 @@ const EFairPriceDeltaExceeded: u64 = 5;
 const EOraclePricesNotSet: u64 = 6;
 const EInvalidTouchConfirmations: u64 = 7;
 
+/// Emitted when the oracle is activated for live pricing.
 public struct OraclePriceActivated has copy, drop, store {
     oracle_id: ID,
     expiry: u64,
@@ -29,6 +30,7 @@ public struct OraclePriceActivated has copy, drop, store {
     timestamp: u64,
 }
 
+/// Emitted on every successful operator price update prior to settlement.
 public struct OraclePriceUpdated has copy, drop, store {
     oracle_id: ID,
     spot: u64,
@@ -37,6 +39,9 @@ public struct OraclePriceUpdated has copy, drop, store {
     timestamp: u64,
 }
 
+/// Emitted exactly once, when settlement state freezes.
+/// `yes_wins` reflects the binary outcome; `settlement_price` records the
+/// spot at the moment of settlement.
 public struct OraclePriceSettled has copy, drop, store {
     oracle_id: ID,
     expiry: u64,
@@ -88,6 +93,8 @@ public struct OracleCapPrice has key, store {
 
 // === Public Functions ===
 
+/// Operator-only: flip the oracle to active. Requires that prices have
+/// been seeded (timestamp > 0) and that current time is before expiry.
 public fun activate<Underlying>(
     oracle: &mut OraclePrice<Underlying>,
     cap: &OracleCapPrice,
@@ -108,6 +115,10 @@ public fun activate<Underlying>(
     });
 }
 
+/// Operator-only: refresh spot and fair_price. While the oracle is active,
+/// each update may trigger settlement (at-expiry or touch). After settlement
+/// the function still accepts updates but only bumps `timestamp` and
+/// returns without emitting an update event.
 public fun update_price<Underlying>(
     oracle: &mut OraclePrice<Underlying>,
     cap: &OracleCapPrice,
@@ -158,34 +169,45 @@ public fun update_price<Underlying>(
     });
 }
 
+/// On-chain ID of this shared oracle.
 public fun id<Underlying>(oracle: &OraclePrice<Underlying>): ID { oracle.id.to_inner() }
 
+/// Configured expiry (ms since epoch).
 public fun expiry<Underlying>(oracle: &OraclePrice<Underlying>): u64 { oracle.expiry }
 
+/// Configured price threshold for YES/NO determination.
 public fun threshold<Underlying>(oracle: &OraclePrice<Underlying>): u64 { oracle.threshold }
 
+/// True once a settlement price has been frozen.
 public fun is_settled<Underlying>(oracle: &OraclePrice<Underlying>): bool {
     oracle.settlement_price.is_some()
 }
 
+/// True iff the YES outcome won (only meaningful after settlement).
 public fun is_yes_winner<Underlying>(oracle: &OraclePrice<Underlying>): bool { oracle.yes_wins }
 
+/// True while the oracle is accepting live updates (post-activate, pre-settle).
 public fun is_active<Underlying>(oracle: &OraclePrice<Underlying>): bool { oracle.active }
 
+/// Most-recently-pushed implied YES probability (scaled by `float_scaling`).
 public fun fair_price<Underlying>(oracle: &OraclePrice<Underlying>): u64 { oracle.fair_price }
 
+/// Most-recently-pushed underlying spot price.
 public fun spot<Underlying>(oracle: &OraclePrice<Underlying>): u64 { oracle.spot }
 
+/// True if the last operator update is older than `staleness_threshold_ms`.
 public fun is_stale<Underlying>(oracle: &OraclePrice<Underlying>, clock: &Clock): bool {
     clock.timestamp_ms() > oracle.timestamp + constants::staleness_threshold_ms!()
 }
 
 // === Public-Package Functions ===
 
+/// Mint a new operator capability. Registry-only.
 public(package) fun create_oracle_cap(ctx: &mut TxContext): OracleCapPrice {
     OracleCapPrice { id: object::new(ctx) }
 }
 
+/// Create and share a new threshold oracle. Registry-only.
 public(package) fun create_oracle<Underlying>(
     cap: &OracleCapPrice,
     expiry: u64,
@@ -222,6 +244,7 @@ public(package) fun create_oracle<Underlying>(
     oracle_id
 }
 
+/// Abort with `EOracleStale` if the oracle has gone stale.
 public(package) fun assert_not_stale<Underlying>(oracle: &OraclePrice<Underlying>, clock: &Clock) {
     assert!(!is_stale(oracle, clock), EOracleStale);
 }

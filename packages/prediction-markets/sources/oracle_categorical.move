@@ -1,7 +1,12 @@
 // Copyright (c) Mysten Labs, Inc.
 // SPDX-License-Identifier: Apache-2.0
 
-/// Categorical oracle for multi-outcome prediction markets.
+/// Oracle for categorical (N-outcome) prediction markets.
+///
+/// One oracle per market, holding a vector of implied probabilities (scaled
+/// by `float_scaling`) that sum to ~1.0 within `fair_price_sum_tolerance`.
+/// Settlement is admin-driven via `resolve` after expiry; the operator is
+/// responsible for keeping prices fresh until then.
 module prediction_markets::oracle_categorical;
 
 use prediction_markets::constants;
@@ -19,6 +24,7 @@ const EPricesSumInvalid: u64 = 8;
 const EOraclePricesNotSet: u64 = 9;
 const EOracleNotExpired: u64 = 10;
 
+/// Emitted when the oracle is activated for live pricing.
 public struct OracleCategoricalActivated has copy, drop, store {
     oracle_id: ID,
     num_outcomes: u8,
@@ -26,12 +32,14 @@ public struct OracleCategoricalActivated has copy, drop, store {
     timestamp: u64,
 }
 
+/// Emitted on every successful operator price update prior to resolution.
 public struct OracleCategoricalUpdated has copy, drop, store {
     oracle_id: ID,
     fair_prices: vector<u64>,
     timestamp: u64,
 }
 
+/// Emitted exactly once, when the admin resolves to a winning outcome.
 public struct OracleCategoricalResolved has copy, drop, store {
     oracle_id: ID,
     winning_outcome: u8,
@@ -64,6 +72,8 @@ public struct OracleCapCategorical has key, store {
 
 // === Public Functions ===
 
+/// Operator-only: flip the oracle to active. Requires that prices have
+/// been seeded (timestamp > 0) and that current time is before expiry.
 public fun activate(oracle: &mut OracleCategorical, cap: &OracleCapCategorical, clock: &Clock) {
     assert_authorized_cap(oracle, cap);
     assert!(!oracle.active, EOracleAlreadyActive);
@@ -78,6 +88,8 @@ public fun activate(oracle: &mut OracleCategorical, cap: &OracleCapCategorical, 
     });
 }
 
+/// Operator-only: refresh the implied-probability vector. Asserts the new
+/// vector has the right length and sums to ~1.0 within tolerance.
 public fun update_prices(
     oracle: &mut OracleCategorical,
     cap: &OracleCapCategorical,
@@ -106,6 +118,8 @@ public fun update_prices(
     });
 }
 
+/// Operator-only: freeze the oracle on a winning outcome. Only callable
+/// after expiry and only once.
 public fun resolve(
     oracle: &mut OracleCategorical,
     cap: &OracleCapCategorical,
@@ -125,34 +139,45 @@ public fun resolve(
     });
 }
 
+/// On-chain ID of this shared oracle.
 public fun id(oracle: &OracleCategorical): ID { oracle.id.to_inner() }
 
+/// Configured expiry (ms since epoch).
 public fun expiry(oracle: &OracleCategorical): u64 { oracle.expiry }
 
+/// Number of outcomes for this oracle (always >= 2).
 public fun num_outcomes(oracle: &OracleCategorical): u8 { oracle.num_outcomes }
 
+/// Snapshot of the implied-probability vector.
 public fun fair_prices(oracle: &OracleCategorical): vector<u64> { oracle.fair_prices }
 
+/// Implied probability for a single outcome index.
 public fun fair_price(oracle: &OracleCategorical, index: u8): u64 {
     oracle.fair_prices[index as u64]
 }
 
+/// True once the oracle has resolved.
 public fun is_resolved(oracle: &OracleCategorical): bool { oracle.winning_outcome.is_some() }
 
+/// Winning outcome index (None pre-resolution).
 public fun winning_outcome(oracle: &OracleCategorical): Option<u8> { oracle.winning_outcome }
 
+/// True while the oracle is accepting live updates (post-activate, pre-resolve).
 public fun is_active(oracle: &OracleCategorical): bool { oracle.active }
 
+/// True if the last operator update is older than `staleness_threshold_ms`.
 public fun is_stale(oracle: &OracleCategorical, clock: &Clock): bool {
     clock.timestamp_ms() > oracle.timestamp + constants::staleness_threshold_ms!()
 }
 
 // === Public-Package Functions ===
 
+/// Mint a new operator capability. Registry-only.
 public(package) fun create_oracle_cap(ctx: &mut TxContext): OracleCapCategorical {
     OracleCapCategorical { id: object::new(ctx) }
 }
 
+/// Create and share a new categorical oracle. Registry-only.
 public(package) fun create_oracle(
     cap: &OracleCapCategorical,
     expiry: u64,
@@ -178,6 +203,7 @@ public(package) fun create_oracle(
     oracle_id
 }
 
+/// Abort with `EOracleStale` if the oracle has gone stale.
 public(package) fun assert_not_stale(oracle: &OracleCategorical, clock: &Clock) {
     assert!(!is_stale(oracle, clock), EOracleStale);
 }

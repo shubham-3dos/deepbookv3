@@ -1,15 +1,25 @@
 // Copyright (c) Mysten Labs, Inc.
 // SPDX-License-Identifier: Apache-2.0
 
-/// MarketCap capability for authorized market packages.
+/// Capability granting authority to operate on a Predict pool's collateral.
+///
+/// A `MarketCap` binds three things: the Predict pool ID, the oracle ID, and
+/// a market type (threshold or categorical). It is created by the registry
+/// when a market is registered and held inside the calling market's shared
+/// `MarketState`. Because the cap is never extracted from the state, the
+/// authorization survives package upgrades.
 module prediction_markets::market_cap;
 
 const EInvalidPredict: u64 = 0;
 const EInvalidOracle: u64 = 1;
 
+// Two-outcome (YES/NO) threshold market.
 const MARKET_TYPE_THRESHOLD: u8 = 0;
+// N-outcome (2 <= N <= 255) categorical market.
 const MARKET_TYPE_CATEGORICAL: u8 = 1;
 
+/// Authorization capability bound to a single (Predict, oracle, market type)
+/// triple. Held inside the calling market's shared state.
 public struct MarketCap has key, store {
     id: UID,
     predict_id: ID,
@@ -20,20 +30,27 @@ public struct MarketCap has key, store {
 
 // === Public Functions ===
 
+/// Predict pool ID this cap is bound to.
 public fun predict_id(cap: &MarketCap): ID { cap.predict_id }
 
+/// Oracle ID this cap is bound to.
 public fun oracle_id(cap: &MarketCap): ID { cap.oracle_id }
 
+/// Market-type tag (`MARKET_TYPE_THRESHOLD` or `MARKET_TYPE_CATEGORICAL`).
 public fun market_type(cap: &MarketCap): u8 { cap.market_type }
 
+/// Number of outcomes for this market (always 2 for threshold; 2..=255 otherwise).
 public fun num_outcomes(cap: &MarketCap): u8 { cap.num_outcomes }
 
+/// True if this cap authorizes a threshold market.
 public fun is_threshold(cap: &MarketCap): bool { cap.market_type == MARKET_TYPE_THRESHOLD }
 
+/// True if this cap authorizes a categorical market.
 public fun is_categorical(cap: &MarketCap): bool { cap.market_type == MARKET_TYPE_CATEGORICAL }
 
 // === Public-Package Functions ===
 
+/// Mint a fresh threshold-market cap (always 2 outcomes).
 public(package) fun new_threshold(predict_id: ID, oracle_id: ID, ctx: &mut TxContext): MarketCap {
     MarketCap {
         id: object::new(ctx),
@@ -44,6 +61,7 @@ public(package) fun new_threshold(predict_id: ID, oracle_id: ID, ctx: &mut TxCon
     }
 }
 
+/// Mint a fresh categorical-market cap with the given outcome count.
 public(package) fun new_categorical(
     predict_id: ID,
     oracle_id: ID,
